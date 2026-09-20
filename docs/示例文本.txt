@@ -1,0 +1,3 @@
+The quick brown fox jumps over the lazy dog.
+This is a sample document for the LineTrans web server.
+You can edit translations directly in the browser.

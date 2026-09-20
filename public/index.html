@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0e1014">
+<title>LineTrans · 网页翻译台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">LT</div>
+      <div>
+        <h1>LineTrans</h1>
+        <p id="serverInfo">网页翻译台</p>
+      </div>
+    </div>
+    <div class="search">
+      <input id="docSearch" type="search" placeholder="搜索文档…" autocomplete="off">
+    </div>
+    <div id="docList" class="doc-list"></div>
+    <div class="sidebar-foot">
+      <span id="connState" class="pill">连接中…</span>
+      <a id="terminalLink" href="/terminal" target="_blank" rel="noopener">Shell 终端</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="doc-meta">
+        <h2 id="docTitle">请选择文档</h2>
+        <p id="docSub">从左侧选择一篇文档开始翻译</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="btnMode" class="btn ghost" disabled>逐行</button>
+        <button id="btnBatch" class="btn" disabled>AI 翻译剩余</button>
+        <button id="btnExport" class="btn ghost" disabled>导出</button>
+      </div>
+    </header>
+
+    <div class="progress-wrap" id="progressWrap" hidden>
+      <div class="progress"><div id="progressBar" class="progress-bar"></div></div>
+      <span id="progressText">0 / 0</span>
+    </div>
+
+    <div class="filters" id="filters" hidden>
+      <button class="chip active" data-filter="all">全部</button>
+      <button class="chip" data-filter="todo">未完成</button>
+      <button class="chip" data-filter="star">收藏</button>
+      <input id="unitSearch" type="search" placeholder="在原文/译文中查找…" autocomplete="off">
+      <span id="unitCount" class="muted"></span>
+    </div>
+
+    <section id="editor" class="editor"></section>
+    <div id="emptyState" class="empty">
+      <b>还没有载入文档</b>
+      <span>左侧点选一篇文档即可开始逐句校对与翻译。</span>
+    </div>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

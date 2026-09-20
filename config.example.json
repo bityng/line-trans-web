@@ -1,0 +1,21 @@
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "token": "",
+  "targetLang": "zh-CN",
+  "sourceLang": "auto",
+  "detectLanguage": true,
+  "contextUnits": 3,
+  "systemPrompt": "你是专业翻译。请把用户提供的内容从 {sourceLang} 翻译成 {targetLang}。只输出译文，不要解释，不要添加多余内容，保持原有格式与换行。",
+  "glossary": "",
+  "provider": {
+    "type": "openai",
+    "baseUrl": "https://api.deepseek.com",
+    "apiKey": "",
+    "model": "deepseek-chat",
+    "temperature": 0.2,
+    "maxTokens": 4096,
+    "inputPrice": 0,
+    "outputPrice": 0
+  }
+}
