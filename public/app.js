@@ -12,19 +12,25 @@
 
   var TOKEN = new URLSearchParams(location.search).get('token') || '';
   var THEME_KEY = 'lt-theme';
+  var WINDOW_SIZE = 60;
+
   var state = {
     info: null,
     docs: [],
     doc: null,
+    filtered: [],
     filter: 'all',
     query: '',
     docQuery: '',
     current: -1,
+    windowStart: 0,
     saving: 0,
     batch: { running: false, stop: false, done: 0, total: 0 }
   };
 
   var $ = function (id) { return document.getElementById(id); };
+  var editor = null;
+  var sentinelObserver = null;
 
   // ---------------- 主题 ----------------
 
@@ -81,40 +87,63 @@
 
   function pct(done, total) { return total ? Math.round(done * 100 / total) : 0; }
 
-  // ---------------- 文档列表 ----------------
+  // ---------------- 侧栏（按文件夹分组） ----------------
 
-  function renderDocs() {
+  function renderSidebar() {
     var list = $('docList');
     var q = state.docQuery.toLowerCase();
     var docs = state.docs.filter(function (d) { return !q || d.name.toLowerCase().indexOf(q) >= 0; });
     list.innerHTML = '';
     if (!docs.length) {
-      list.innerHTML = '<div class="muted" style="padding:12px">没有文档</div>';
+      list.innerHTML = '<div class="muted" style="padding:12px 18px">没有文档</div>';
       return;
     }
+    var folders = [];
     docs.forEach(function (d) {
-      var el = document.createElement('div');
-      el.className = 'doc-item' + (state.doc && state.doc.id === d.id ? ' active' : '');
-      el.innerHTML =
-        '<div class="doc-name">' + (d.pinned ? '📌 ' : '') + '<span></span></div>' +
-        '<div class="doc-sub"><span class="folder"></span><span class="p"></span></div>' +
-        '<div class="mini-progress"><i></i></div>';
-      el.querySelector('.doc-name span').textContent = d.name;
-      el.querySelector('.folder').textContent = d.folder || '默认';
-      el.querySelector('.p').textContent = d.done + ' / ' + d.total + ' · ' + pct(d.done, d.total) + '%';
-      el.querySelector('.mini-progress > i').style.width = pct(d.done, d.total) + '%';
-      el.addEventListener('click', function () { openDoc(d.id); });
-      list.appendChild(el);
+      var f = d.folder || '默认';
+      if (folders.indexOf(f) < 0) folders.push(f);
+    });
+    folders.forEach(function (folder) {
+      var group = docs.filter(function (d) { return (d.folder || '默认') === folder; })
+        .sort(function (a, b) {
+          if (!!b.pinned - !!a.pinned) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+          return (b.updatedAt || 0) - (a.updatedAt || 0);
+        });
+      var label = document.createElement('div');
+      label.className = 'folder-label';
+      label.innerHTML = '<span></span><span class="count"></span>';
+      label.querySelector('span').textContent = folder;
+      label.querySelector('.count').textContent = group.length;
+      list.appendChild(label);
+      group.forEach(function (d) { list.appendChild(renderDocItem(d)); });
     });
   }
 
-  // ---------------- 文档内容 ----------------
+  function renderDocItem(d) {
+    var el = document.createElement('div');
+    el.className = 'doc-item' + (state.doc && state.doc.id === d.id ? ' active' : '');
+    el.innerHTML =
+      '<div class="doc-name">' + (d.pinned ? '📌 ' : '') + '<span></span></div>' +
+      '<div class="doc-sub"><span class="mode"></span><span class="p"></span></div>' +
+      '<div class="mini-progress"><i></i></div>';
+    el.querySelector('.doc-name span').textContent = d.name;
+    el.querySelector('.mode').textContent = d.unitMode === 'SENTENCE' ? '逐句' : '逐行';
+    el.querySelector('.p').textContent = d.done + ' / ' + d.total + ' · ' + pct(d.done, d.total) + '%';
+    el.querySelector('.mini-progress > i').style.width = pct(d.done, d.total) + '%';
+    el.addEventListener('click', function () {
+      closeSidebar();
+      openDoc(d.id);
+    });
+    return el;
+  }
+
+  // ---------------- 文档 ----------------
 
   function openDoc(id) {
     api('api/doc?id=' + encodeURIComponent(id)).then(function (doc) {
       state.doc = doc;
       state.current = -1;
-      renderDocs();
+      renderSidebar();
       renderDoc();
       setConn('已连接', true);
       $('scrollArea').scrollTop = 0;
@@ -126,7 +155,11 @@
     var p = pct(state.doc.done, state.doc.total);
     $('progressBar').style.width = p + '%';
     $('progressText').textContent = state.doc.done + ' / ' + state.doc.total + ' · ' + p + '%';
+    $('ringText').textContent = p + '%';
+    var circumference = 2 * Math.PI * 15.5;
+    $('ringValue').style.strokeDashoffset = String(circumference * (1 - p / 100));
     $('btnMode').textContent = state.doc.unitMode === 'SENTENCE' ? '逐句' : '逐行';
+
     var remaining = state.doc.total - state.doc.done;
     var canTranslate = !!(state.info && state.info.canTranslate);
     if (state.batch.running) {
@@ -135,7 +168,7 @@
     } else if (!canTranslate) {
       $('btnBatch').textContent = '未配置模型';
       $('btnBatch').disabled = true;
-      $('btnBatch').title = '请先在服务端配置 provider.baseUrl / apiKey / model（手机端：设置 → AI 翻译）';
+      $('btnBatch').title = '请先配置模型（手机端：设置 → AI 翻译；服务端：config.json）';
     } else {
       $('btnBatch').textContent = 'AI 翻译剩余 ' + remaining;
       $('btnBatch').disabled = remaining === 0;
@@ -143,10 +176,10 @@
     }
   }
 
-  function visibleUnits() {
-    if (!state.doc) return [];
+  function applyFilter() {
+    if (!state.doc) { state.filtered = []; return; }
     var q = state.query.toLowerCase();
-    return state.doc.units.filter(function (u) {
+    state.filtered = state.doc.units.filter(function (u) {
       if (state.filter === 'todo' && u.done) return false;
       if (state.filter === 'star' && !u.starred) return false;
       if (q && (u.source + ' ' + u.translation).toLowerCase().indexOf(q) < 0) return false;
@@ -167,13 +200,54 @@
     $('btnMode').disabled = false;
     $('btnExport').disabled = false;
     updateProgress();
+    applyFilter();
+    $('unitCount').textContent = '显示 ' + state.filtered.length + ' / ' + doc.total;
+    state.windowStart = 0;
+    renderWindow(true);
+  }
 
-    var units = visibleUnits();
-    $('unitCount').textContent = '显示 ' + units.length + ' / ' + doc.total;
+  /** 分窗口渲染：默认 60 句，滚到底部自动加载下一批（长文档不再卡） */
+  function renderWindow(reset) {
+    if (reset) {
+      editor.innerHTML = '';
+      state.windowStart = 0;
+      $('editorEmpty').hidden = state.filtered.length > 0;
+    }
+    var from = state.windowStart;
+    var to = Math.min(from + WINDOW_SIZE, state.filtered.length);
+    for (var i = from; i < to; i++) editor.appendChild(renderRow(state.filtered[i]));
+    state.windowStart = to;
+    updateWindowInfo();
+    observeSentinel();
+  }
 
-    var editor = $('editor');
-    editor.innerHTML = '';
-    units.forEach(function (u) { editor.appendChild(renderRow(u)); });
+  function updateWindowInfo() {
+    var el = $('windowInfo');
+    if (!state.filtered.length) {
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    el.textContent = '已显示 ' + state.windowStart + ' / ' + state.filtered.length;
+  }
+
+  function observeSentinel() {
+    var old = document.getElementById('moreSentinel');
+    if (old) old.remove();
+    if (state.windowStart >= state.filtered.length) return;
+    var sentinel = document.createElement('div');
+    sentinel.className = 'loading-more';
+    sentinel.id = 'moreSentinel';
+    sentinel.textContent = '加载更多…';
+    editor.appendChild(sentinel);
+    if (!sentinelObserver) {
+      sentinelObserver = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting && state.windowStart < state.filtered.length) renderWindow(false);
+        });
+      }, { root: $('scrollArea'), rootMargin: '400px' });
+    }
+    sentinelObserver.observe(sentinel);
   }
 
   function renderRow(u) {
@@ -186,8 +260,6 @@
     var pill = document.createElement('span');
     pill.className = 'index-pill';
     pill.textContent = (u.i + 1);
-    var dot = document.createElement('span');
-    dot.className = 'dot' + (u.done ? ' done' : '');
     var star = document.createElement('button');
     star.className = 'star' + (u.starred ? ' on' : '');
     star.textContent = u.starred ? '★' : '☆';
@@ -202,20 +274,30 @@
     aiBtn.className = 'tool';
     aiBtn.textContent = 'AI 翻译';
     head.appendChild(pill);
-    head.appendChild(dot);
     head.appendChild(star);
     head.appendChild(spacer);
     head.appendChild(copyBtn);
     head.appendChild(aiBtn);
 
+    // 原文
+    var sourceBlock = document.createElement('div');
+    sourceBlock.className = 'row-block';
+    var sourceLabel = document.createElement('div');
+    sourceLabel.className = 'row-label';
+    sourceLabel.innerHTML = '<span class="dot' + (u.done ? ' done' : '') + '"></span>原文 · 双击可编辑';
     var source = document.createElement('div');
     source.className = 'source';
     source.textContent = u.source;
-    source.title = '双击可修改原文';
     source.addEventListener('dblclick', function () { editSource(u, source); });
+    sourceBlock.appendChild(sourceLabel);
+    sourceBlock.appendChild(source);
 
-    var wrap = document.createElement('div');
-    wrap.className = 'translation-wrap';
+    // 译文
+    var transBlock = document.createElement('div');
+    transBlock.className = 'row-block';
+    var transLabel = document.createElement('div');
+    transLabel.className = 'row-label';
+    transLabel.textContent = '译文';
     var ta = document.createElement('textarea');
     ta.className = 'translation';
     ta.value = u.translation || '';
@@ -226,13 +308,17 @@
       clearTimeout(timer);
       timer = setTimeout(function () { saveUnit(u.i, { translation: ta.value }); }, 500);
     });
-    ta.addEventListener('focus', function () { state.current = u.i; highlight(); });
+    ta.addEventListener('focus', function () {
+      state.current = u.i;
+      highlight();
+    });
     ta.addEventListener('keydown', function (e) {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); ta.blur(); gotoRelative(u.i, 1); }
       if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); gotoRelative(u.i, 1); }
       if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); gotoRelative(u.i, -1); }
     });
-    wrap.appendChild(ta);
+    transBlock.appendChild(transLabel);
+    transBlock.appendChild(ta);
 
     copyBtn.addEventListener('click', function () {
       navigator.clipboard.writeText(ta.value || u.source).then(function () { toast('已复制'); });
@@ -240,8 +326,8 @@
     aiBtn.addEventListener('click', function () { aiTranslate(u.i, aiBtn); });
 
     row.appendChild(head);
-    row.appendChild(source);
-    row.appendChild(wrap);
+    row.appendChild(sourceBlock);
+    row.appendChild(transBlock);
     return row;
   }
 
@@ -249,17 +335,17 @@
     var ta = document.createElement('textarea');
     ta.className = 'source-edit';
     ta.value = u.source;
-    var commit = function () {
-      var text = ta.value;
-      if (text === u.source) { restore(); return; }
-      api('api/unit', { method: 'POST', body: JSON.stringify({ docId: state.doc.id, index: u.i, source: text }) })
-        .then(function () { u.source = text; restore(); })
-        .catch(function (e) { toast('保存原文失败：' + e.message); });
-    };
     var restore = function () {
       box.textContent = u.source;
       box.style.display = '';
       if (ta.parentNode) ta.remove();
+    };
+    var commit = function () {
+      var text = ta.value;
+      if (text === u.source) { restore(); return; }
+      api('api/unit', { method: 'POST', body: JSON.stringify({ docId: state.doc.id, index: u.i, source: text }) })
+        .then(function () { u.source = text; restore(); toast('原文已保存'); })
+        .catch(function (e) { toast('保存原文失败：' + e.message); });
     };
     ta.addEventListener('blur', commit);
     ta.addEventListener('keydown', function (e) {
@@ -277,19 +363,34 @@
     });
   }
 
-  function gotoRelative(index, delta) {
-    var units = visibleUnits();
-    var pos = units.findIndex(function (u) { return u.i === index; });
-    var next = units[pos + delta];
-    if (!next) return;
-    state.current = next.i;
+  /** 跳到某一序号：必要时先重排窗口再滚动聚焦 */
+  function gotoIndex(index, focus) {
+    var pos = state.filtered.findIndex(function (u) { return u.i === index; });
+    if (pos < 0) {
+      toast('当前筛选下没有这一句');
+      return;
+    }
+    state.current = index;
+    // 逐批补渲染到目标行（保留已渲染内容，滚回去不会空白）
+    var guard = 0;
+    while (state.windowStart <= pos && state.windowStart < state.filtered.length && guard++ < 200) {
+      renderWindow(false);
+    }
     highlight();
-    var row = document.querySelector('.row[data-index="' + next.i + '"]');
-    if (row) {
-      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    var row = document.querySelector('.row[data-index="' + index + '"]');
+    if (!row) return;
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (focus) {
       var ta = row.querySelector('textarea.translation');
       if (ta) ta.focus();
     }
+  }
+
+  function gotoRelative(index, delta) {
+    var pos = state.filtered.findIndex(function (u) { return u.i === index; });
+    var next = state.filtered[pos + delta];
+    if (!next) return;
+    gotoIndex(next.i, true);
   }
 
   // ---------------- 保存 / AI ----------------
@@ -299,7 +400,10 @@
     state.saving++;
     return api('api/unit', { method: 'POST', body: JSON.stringify(body) })
       .then(function (res) {
+        var before = state.doc.units.find(function (u) { return u.i === index; });
+        var wasDone = !!(before && before.done);
         applyLocal(index, patch);
+        if (!wasDone && before && before.done) scheduleRefilter();
         if (res && typeof res.done === 'number') {
           state.doc.done = res.done;
           state.doc.total = res.total;
@@ -312,13 +416,26 @@
       .finally(function () { state.saving--; });
   }
 
+  /** 在「未完成 / 收藏」筛选下，句子状态变化后重新整理列表（防抖，避免打字时打断） */
+  var refilterTimer = null;
+  function scheduleRefilter() {
+    if (state.filter === 'all' && !state.query) return;
+    clearTimeout(refilterTimer);
+    refilterTimer = setTimeout(function () {
+      applyFilter();
+      $('unitCount').textContent = '显示 ' + state.filtered.length + ' / ' + (state.doc ? state.doc.total : 0);
+      renderWindow(true);
+    }, 900);
+  }
+
   function updateDocSummary() {
     if (!state.doc) return;
     var item = state.docs.find(function (d) { return d.id === state.doc.id; });
-    if (!item) return;
-    item.done = state.doc.done;
-    item.total = state.doc.total;
-    renderDocs();
+    if (item) {
+      item.done = state.doc.done;
+      item.total = state.doc.total;
+    }
+    renderSidebar();
   }
 
   function applyLocal(index, patch) {
@@ -330,11 +447,13 @@
     if (typeof patch.done === 'boolean') unit.done = patch.done;
     unit.done = unit.done || !!unit.translation.trim();
     var row = document.querySelector('.row[data-index="' + index + '"]');
-    if (row) {
-      var dot = row.querySelector('.dot');
-      if (dot) dot.className = 'dot' + (unit.done ? ' done' : '');
-      var star = row.querySelector('.star');
-      if (star) { star.textContent = unit.starred ? '★' : '☆'; star.className = 'star' + (unit.starred ? ' on' : ''); }
+    if (!row) return;
+    var dot = row.querySelector('.row-label .dot');
+    if (dot) dot.className = 'dot' + (unit.done ? ' done' : '');
+    var star = row.querySelector('.star');
+    if (star) {
+      star.textContent = unit.starred ? '★' : '☆';
+      star.className = 'star' + (unit.starred ? ' on' : '');
     }
   }
 
@@ -353,7 +472,7 @@
         if (row) {
           var ta = row.querySelector('textarea.translation');
           if (ta) ta.value = res.text;
-          var dot = row.querySelector('.dot');
+          var dot = row.querySelector('.row-label .dot');
           if (dot) dot.className = 'dot done';
         }
         if (res.cost) toast('已翻译（≈' + Number(res.cost).toFixed(4) + ' 元）');
@@ -385,7 +504,6 @@
       }
       aiTranslate(pending[i].i, null).then(function (res) {
         if (!res || res.ok === false) {
-          // 出错就停下来，避免一路报错刷屏
           state.batch.running = false;
           updateProgress();
           return;
@@ -397,7 +515,7 @@
     })(0);
   }
 
-  // ---------------- 设置弹窗 ----------------
+  // ---------------- 设置 ----------------
 
   function openSettings() {
     $('settingsMask').hidden = false;
@@ -411,15 +529,33 @@
 
   function closeSettings() { $('settingsMask').hidden = true; }
 
+  function openSidebar() {
+    $('sidebar').classList.add('open');
+    $('scrim').classList.add('show');
+  }
+
+  function closeSidebar() {
+    $('sidebar').classList.remove('open');
+    $('scrim').classList.remove('show');
+  }
+
   function bind() {
-    $('docSearch').addEventListener('input', function (e) { state.docQuery = e.target.value; renderDocs(); });
-    $('unitSearch').addEventListener('input', function (e) { state.query = e.target.value; renderDoc(); });
+    editor = $('editor');
+    $('docSearch').addEventListener('input', function (e) { state.docQuery = e.target.value; renderSidebar(); });
+    $('unitSearch').addEventListener('input', function (e) {
+      state.query = e.target.value;
+      applyFilter();
+      $('unitCount').textContent = '显示 ' + state.filtered.length + ' / ' + (state.doc ? state.doc.total : 0);
+      renderWindow(true);
+    });
     Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (chip) {
       chip.addEventListener('click', function () {
         Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (c) { c.classList.remove('active'); });
         chip.classList.add('active');
         state.filter = chip.dataset.filter;
-        renderDoc();
+        applyFilter();
+        $('unitCount').textContent = '显示 ' + state.filtered.length + ' / ' + (state.doc ? state.doc.total : 0);
+        renderWindow(true);
       });
     });
     $('btnBatch').addEventListener('click', runBatch);
@@ -435,6 +571,16 @@
         .then(function () { openDoc(state.doc.id); toast('已切换为' + (next === 'SENTENCE' ? '逐句' : '逐行')); })
         .catch(function (e) { toast('切换失败：' + e.message); });
     });
+    $('jumpInput').addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      var n = Number($('jumpInput').value);
+      if (!state.doc || !n) return;
+      var target = state.doc.units[Math.min(Math.max(1, Math.round(n)), state.doc.total) - 1];
+      if (target) gotoIndex(target.i, true);
+      $('jumpInput').value = '';
+    });
+    $('btnSidebar').addEventListener('click', openSidebar);
+    $('scrim').addEventListener('click', closeSidebar);
 
     $('btnSettings').addEventListener('click', openSettings);
     $('btnCloseSettings').addEventListener('click', closeSettings);
@@ -442,7 +588,7 @@
       if (e.target === $('settingsMask')) closeSettings();
     });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') closeSettings();
+      if (e.key === 'Escape') { closeSettings(); closeSidebar(); }
     });
     Array.prototype.forEach.call(document.querySelectorAll('#themeCards .theme-card'), function (card) {
       card.addEventListener('click', function () { applyTheme(card.dataset.theme); });
@@ -474,7 +620,7 @@
     return api('api/docs');
   }).then(function (res) {
     state.docs = res.docs || [];
-    renderDocs();
+    renderSidebar();
     if (state.docs.length) openDoc(state.docs[0].id);
   }).catch(function (e) {
     setConn('连接失败', false);

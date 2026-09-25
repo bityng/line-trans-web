@@ -127,12 +127,104 @@ function smartClean(text) {
     .join('\n');
 }
 
-function parseUnits(text, mode) {
-  if (mode === 'SENTENCE') {
-    const re = /[^。！？!?；;.…\n]+[。！？?!；;.…\n]*[”’"'）)]*/g;
-    return (text.match(re) || []).map((s) => s.trim()).filter(Boolean);
+const ABBREVIATIONS = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'prof', 'st', 'jr', 'sr', 'vs', 'etc', 'e.g', 'i.e', 'a.m', 'p.m',
+  'no', 'fig', 'inc', 'ltd', 'co', 'dept', 'univ', 'approx', 'cf', 'al', 'ibid', 'eg', 'ie',
+  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+  'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun', 'u.s', 'u.k', 'u.n', 'd.c',
+  'ph.d', 'b.a', 'm.a', 'b.sc', 'm.sc', 'vol', 'pp', 'ed', 'eds', 'trans'
+]);
+const CLOSERS = '”’"\'）)]》〉」』】〕｝}';
+const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]/;
+
+function isSentenceEnd(ch) {
+  return '。！？!?…；'.includes(ch);
+}
+
+/** 段落内的软换行合并：英文之间补空格，中日韩之间不补 */
+function joinSoftLines(lines) {
+  let out = lines[0];
+  for (let i = 1; i < lines.length; i++) {
+    const prev = out.slice(-1);
+    const next = lines[i].slice(0, 1);
+    const latinPrev = /[A-Za-z0-9.,;:!?)\]}'"”’]/.test(prev);
+    const latinNext = /[A-Za-z0-9(\[{'"“‘]/.test(next);
+    const cjk = CJK_RE.test(prev) || CJK_RE.test(next);
+    if (latinPrev && latinNext && !cjk) out += ' ';
+    out += lines[i];
   }
-  return text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return out;
+}
+
+function isAbbreviation(prefix) {
+  const m = prefix.match(/([A-Za-z][A-Za-z.]*)$/);
+  if (!m) return false;
+  const raw = m[1];
+  const token = raw.toLowerCase().replace(/\.+$/, '');
+  if (token.length === 1 && /[A-Z]/.test(raw.trim())) return true;
+  return ABBREVIATIONS.has(token);
+}
+
+function splitSentences(text) {
+  const out = [];
+  const paragraphs = text.replace(/\r\n?/g, '\n').split(/\n[ \t]*\n+/);
+  for (const para of paragraphs) {
+    const lines = para.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    const joined = joinSoftLines(lines);
+    let buf = '';
+    for (let i = 0; i < joined.length; i++) {
+      const ch = joined[i];
+      buf += ch;
+      const isDot = ch === '.';
+      const isEllipsis = ch === '…';
+      const isTripleDot = isDot && joined.slice(i - 2, i + 1) === '...';
+      if (!isSentenceEnd(ch) && !isDot) continue;
+
+      if (isEllipsis || isTripleDot) {
+        let start = i;
+        while (start > 0 && (joined[start - 1] === '.' || joined[start - 1] === '…')) start--;
+        let end = i + 1;
+        while (end < joined.length && (joined[end] === '.' || joined[end] === '…')) end++;
+        buf = buf.slice(0, buf.length - (i - start + 1)) + '…';
+        while (end < joined.length && CLOSERS.includes(joined[end])) { buf += joined[end]; end++; }
+        out.push(buf.trim());
+        buf = '';
+        i = end - 1;
+        continue;
+      }
+
+      if (isDot) {
+        const prev = joined[i - 1] || '';
+        const next = joined[i + 1] || '';
+        if (/\d/.test(prev) && /\d/.test(next)) continue;
+        if (/[A-Za-z0-9]/.test(next)) continue;
+        if (isAbbreviation(buf.slice(0, buf.length - 1))) continue;
+        if (next && !/\s/.test(next) && !CLOSERS.includes(next)) continue;
+      }
+
+      let end = i + 1;
+      while (end < joined.length && CLOSERS.includes(joined[end])) { buf += joined[end]; end++; }
+      const sentence = buf.trim();
+      if (sentence) out.push(sentence);
+      buf = '';
+      i = end - 1;
+    }
+    if (buf.trim()) out.push(buf.trim());
+  }
+  const merged = [];
+  for (const s of out) {
+    const core = s.replace(/[^\p{L}\p{N}]/gu, '');
+    if (merged.length && core.length <= 1) merged[merged.length - 1] += s;
+    else merged.push(s);
+  }
+  return merged.map((s) => s.replace(/[ \t]{2,}/g, ' ').trim()).filter(Boolean);
+}
+
+function parseUnits(text, mode) {
+  const normalized = text.replace(/\r\n?/g, '\n');
+  if (mode === 'SENTENCE') return splitSentences(normalized);
+  return normalized.split('\n').map((s) => s.trim()).filter(Boolean);
 }
 
 function detectLanguage(text) {

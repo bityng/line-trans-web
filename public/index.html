@@ -11,8 +11,10 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="layout">
-  <aside class="sidebar">
+<div class="layout" id="layout">
+  <div class="scrim" id="scrim"></div>
+
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <div class="logo">LT</div>
       <div class="brand-text">
@@ -30,7 +32,6 @@
     <div class="sidebar-search">
       <input id="docSearch" type="search" placeholder="搜索文档" autocomplete="off">
     </div>
-    <div class="section-label">文档</div>
     <div id="docList" class="doc-list"></div>
     <div class="sidebar-foot">
       <span id="connState" class="pill">连接中…</span>
@@ -40,11 +41,26 @@
 
   <main class="main">
     <header class="topbar">
+      <button class="icon-btn only-mobile" id="btnSidebar" title="文档列表" aria-label="文档列表">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M4 6h16M4 12h16M4 18h16"></path>
+        </svg>
+      </button>
+      <div class="ring" id="ring" title="翻译进度">
+        <svg viewBox="0 0 36 36">
+          <circle class="ring-track" cx="18" cy="18" r="15.5"></circle>
+          <circle class="ring-value" id="ringValue" cx="18" cy="18" r="15.5"></circle>
+        </svg>
+        <span id="ringText">0%</span>
+      </div>
       <div class="doc-meta">
         <h2 id="docTitle">请选择文档</h2>
         <p id="docSub">从左侧选择一篇文档开始翻译</p>
       </div>
       <div class="topbar-actions">
+        <div class="jump">
+          <input id="jumpInput" type="number" min="1" placeholder="跳转" title="输入句号后回车跳转">
+        </div>
         <button id="btnMode" class="btn ghost sm" disabled>逐行</button>
         <button id="btnExport" class="btn ghost sm" disabled>导出</button>
       </div>
@@ -60,6 +76,7 @@
 
     <div class="scroll" id="scrollArea">
       <div class="column" id="editor"></div>
+      <div id="editorEmpty" class="empty-small" hidden>没有符合条件的句子</div>
       <div id="emptyState" class="empty">
         <b>还没有载入文档</b>
         <span>左侧点选一篇文档即可开始逐句校对与翻译。</span>
@@ -75,6 +92,7 @@
         <div class="dock-actions">
           <span class="muted" id="dockHint">输入即自动保存 · Ctrl+Enter 下一句</span>
           <span class="grow"></span>
+          <span class="pill" id="windowInfo" hidden></span>
           <button class="btn" id="btnBatch" disabled>AI 翻译剩余</button>
         </div>
       </div>
@@ -115,7 +133,8 @@
             </div>
           </div>
           <div class="field">
-            <label>使用提示</label>
+            <label>显示</label>
+            <div class="kv"><span>每屏渲染句数</span><span id="windowSizeLabel">60（滚动自动加载）</span></div>
             <div class="kv"><span>修改原文</span><span>双击原文即可编辑</span></div>
             <div class="kv"><span>逐句跳转</span><span>Ctrl/⌘ + Enter 下一句，Alt + ↑/↓ 上下句</span></div>
             <div class="kv"><span>自动保存</span><span>输入后 0.5 秒自动写入</span></div>

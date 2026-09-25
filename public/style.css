@@ -291,12 +291,56 @@ textarea.source-edit {
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* ---------------- 进度环 / 跳转 / 分组 ---------------- */
+.ring { position: relative; width: 36px; height: 36px; flex: 0 0 36px; }
+.ring svg { width: 36px; height: 36px; transform: rotate(-90deg); display: block; }
+.ring circle { fill: none; stroke-width: 3; }
+.ring-track { stroke: var(--border-l2); }
+.ring-value {
+  stroke: var(--brand); stroke-linecap: round;
+  stroke-dasharray: 97.4; stroke-dashoffset: 97.4;
+  transition: stroke-dashoffset .35s cubic-bezier(.2, 0, 0, 1);
+}
+.ring span { position: absolute; inset: 0; display: grid; place-items: center; font-size: 9px; color: var(--text-caption); }
+.jump input {
+  width: 78px; height: var(--control-s); padding: 0 10px;
+  border: 1px solid var(--border-l2); border-radius: var(--pill);
+  background: transparent; outline: none;
+}
+.jump input:focus { border-color: var(--brand); }
+.jump input::-webkit-outer-spin-button,
+.jump input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.only-mobile { display: none; }
+.scrim { display: none; }
+.folder-label {
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 18px 4px; font-size: 12px; color: var(--text-caption);
+}
+.folder-label .count { margin-left: auto; }
+.row-block { margin-top: 10px; }
+.row-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-caption); margin-bottom: 4px;
+}
+.row-label .dot { width: 6px; height: 6px; }
+.empty-small { padding: 56px 24px; text-align: center; color: var(--text-caption); font-size: 14px; }
+.loading-more { padding: 14px; text-align: center; color: var(--text-caption); font-size: 13px; }
+
 @media (max-width: 860px) {
-  .layout { flex-direction: column; }
-  .sidebar { width: 100%; flex: 0 0 auto; max-height: 38vh; }
+  .only-mobile { display: inline-grid; }
+  .sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0; width: 280px; max-height: none;
+    transform: translateX(-102%); transition: transform .25s ease; z-index: 30;
+    box-shadow: var(--shadow-l);
+  }
+  .sidebar.open { transform: none; }
+  .scrim.show { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, .35); z-index: 20; }
   .modal-body { flex-direction: column; }
   .modal-nav { width: 100%; flex: 0 0 auto; flex-direction: row; overflow: auto; }
   .modal-pane { padding-left: 0; }
   .column { padding: 16px; }
   .dock { padding: 10px 16px; }
+  .topbar { padding: 10px 14px; gap: 8px; }
+  .jump { display: none; }
+  .row-tools { flex-direction: row; }
 }
