@@ -1,18 +1,17 @@
 /*
  * LineTrans 网页翻译台
- * 与 Android 客户端 / 独立 Node 服务端共用同一套 API：
- *   GET  api/info
- *   GET  api/docs
- *   GET  api/doc?id=ID
- *   POST api/unit   { docId, index, translation?, done?, starred? }
- *   POST api/doc    { docId, name?, folder?, unitMode? }
- *   POST api/ai     { docId, index }
+ * 与安卓客户端 / 独立服务端（line-trans-web）共用同一套 API：
+ *   GET  api/info | api/docs | api/doc?id=ID
+ *   POST api/unit  { docId, index, translation?, source?, done?, starred? }
+ *   POST api/doc   { docId, name?, folder?, pinned?, unitMode? }
+ *   POST api/ai    { docId, index }
  *   GET  api/export?id=ID&format=txt_bilingual
  */
 (function () {
   'use strict';
 
   var TOKEN = new URLSearchParams(location.search).get('token') || '';
+  var THEME_KEY = 'lt-theme';
   var state = {
     info: null,
     docs: [],
@@ -26,6 +25,31 @@
   };
 
   var $ = function (id) { return document.getElementById(id); };
+
+  // ---------------- 主题 ----------------
+
+  function applyTheme(theme) {
+    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+    else delete document.documentElement.dataset.theme;
+    try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* ignore */ }
+    Array.prototype.forEach.call(document.querySelectorAll('#themeCards .theme-card'), function (card) {
+      card.classList.toggle('active', card.dataset.theme === theme);
+    });
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      var dark = theme === 'dark' ||
+        (theme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      meta.setAttribute('content', dark ? '#000000' : '#ffffff');
+    }
+  }
+
+  function initTheme() {
+    var saved = 'system';
+    try { saved = localStorage.getItem(THEME_KEY) || 'system'; } catch (e) { /* ignore */ }
+    applyTheme(saved);
+  }
+
+  // ---------------- 请求 ----------------
 
   function api(path, options) {
     var url = path + (path.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
@@ -57,7 +81,7 @@
 
   function pct(done, total) { return total ? Math.round(done * 100 / total) : 0; }
 
-  // ---------- 文档列表 ----------
+  // ---------------- 文档列表 ----------------
 
   function renderDocs() {
     var list = $('docList');
@@ -75,7 +99,7 @@
         '<div class="doc-name">' + (d.pinned ? '📌 ' : '') + '<span></span></div>' +
         '<div class="doc-sub"><span class="folder"></span><span class="p"></span></div>' +
         '<div class="mini-progress"><i></i></div>';
-      el.querySelector('span').textContent = d.name;
+      el.querySelector('.doc-name span').textContent = d.name;
       el.querySelector('.folder').textContent = d.folder || '默认';
       el.querySelector('.p').textContent = d.done + ' / ' + d.total + ' · ' + pct(d.done, d.total) + '%';
       el.querySelector('.mini-progress > i').style.width = pct(d.done, d.total) + '%';
@@ -84,7 +108,7 @@
     });
   }
 
-  // ---------- 文档内容 ----------
+  // ---------------- 文档内容 ----------------
 
   function openDoc(id) {
     api('api/doc?id=' + encodeURIComponent(id)).then(function (doc) {
@@ -93,20 +117,21 @@
       renderDocs();
       renderDoc();
       setConn('已连接', true);
+      $('scrollArea').scrollTop = 0;
     }).catch(function (e) { toast('打开失败：' + e.message); });
   }
 
   function updateProgress() {
     if (!state.doc) return;
-    var bar = $('progressBar');
     var p = pct(state.doc.done, state.doc.total);
-    bar.style.width = p + '%';
+    $('progressBar').style.width = p + '%';
     $('progressText').textContent = state.doc.done + ' / ' + state.doc.total + ' · ' + p + '%';
     $('btnMode').textContent = state.doc.unitMode === 'SENTENCE' ? '逐句' : '逐行';
     var remaining = state.doc.total - state.doc.done;
     $('btnBatch').textContent = state.batch.running
       ? '停止（' + state.batch.done + '/' + state.batch.total + '）'
       : 'AI 翻译剩余 ' + remaining;
+    $('btnBatch').disabled = false;
   }
 
   function visibleUnits() {
@@ -124,13 +149,13 @@
     var doc = state.doc;
     if (!doc) return;
     $('docTitle').textContent = doc.name;
-    $('docSub').textContent = (doc.folder || '默认') + ' · ' + (doc.unitMode === 'SENTENCE' ? '逐句' : '逐行') +
-      (state.info && state.info.provider ? ' · 模型服务：' + state.info.provider : ' · 未配置模型');
-    $('progressWrap').hidden = false;
-    $('filters').hidden = false;
+    $('docSub').textContent = (doc.folder || '默认') + ' · ' +
+      (doc.unitMode === 'SENTENCE' ? '逐句' : '逐行') +
+      (state.info && state.info.provider ? ' · 模型：' + state.info.provider : ' · 未配置模型');
+    $('subbar').hidden = false;
+    $('dock').hidden = false;
     $('emptyState').hidden = true;
     $('btnMode').disabled = false;
-    $('btnBatch').disabled = false;
     $('btnExport').disabled = false;
     updateProgress();
 
@@ -142,29 +167,44 @@
     units.forEach(function (u) { editor.appendChild(renderRow(u)); });
   }
 
-  function rowStatus(u) { return u.done ? 'done' : ''; }
-
   function renderRow(u) {
     var row = document.createElement('div');
     row.className = 'row' + (state.current === u.i ? ' current' : '');
     row.dataset.index = u.i;
 
-    var indexCell = document.createElement('div');
-    indexCell.className = 'row-index';
-    indexCell.innerHTML = '<div class="dot ' + rowStatus(u) + '"></div><span>' + (u.i + 1) + '</span>';
+    var head = document.createElement('div');
+    head.className = 'row-head';
+    var pill = document.createElement('span');
+    pill.className = 'index-pill';
+    pill.textContent = (u.i + 1);
+    var dot = document.createElement('span');
+    dot.className = 'dot' + (u.done ? ' done' : '');
     var star = document.createElement('button');
     star.className = 'star' + (u.starred ? ' on' : '');
     star.textContent = u.starred ? '★' : '☆';
     star.title = '收藏';
     star.addEventListener('click', function () { saveUnit(u.i, { starred: !u.starred }); });
-    indexCell.appendChild(star);
+    var spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    var copyBtn = document.createElement('button');
+    copyBtn.className = 'tool';
+    copyBtn.textContent = '复制';
+    var aiBtn = document.createElement('button');
+    aiBtn.className = 'tool';
+    aiBtn.textContent = 'AI 翻译';
+    head.appendChild(pill);
+    head.appendChild(dot);
+    head.appendChild(star);
+    head.appendChild(spacer);
+    head.appendChild(copyBtn);
+    head.appendChild(aiBtn);
 
-    var sourceCell = document.createElement('div');
-    sourceCell.className = 'cell';
-    sourceCell.appendChild(buildSource(u));
+    var source = document.createElement('div');
+    source.className = 'source';
+    source.textContent = u.source;
+    source.title = '双击可修改原文';
+    source.addEventListener('dblclick', function () { editSource(u, source); });
 
-    var translationCell = document.createElement('div');
-    translationCell.className = 'cell translation-cell';
     var wrap = document.createElement('div');
     wrap.className = 'translation-wrap';
     var ta = document.createElement('textarea');
@@ -185,50 +225,41 @@
     });
     wrap.appendChild(ta);
 
-    var tools = document.createElement('div');
-    tools.className = 'row-tools';
-    var aiBtn = document.createElement('button');
-    aiBtn.className = 'icon-btn';
-    aiBtn.textContent = 'AI';
-    aiBtn.title = '用已配置的模型翻译这一句';
-    aiBtn.addEventListener('click', function () { aiTranslate(u.i, aiBtn); });
-    var copyBtn = document.createElement('button');
-    copyBtn.className = 'icon-btn';
-    copyBtn.textContent = '复制';
     copyBtn.addEventListener('click', function () {
-      navigator.clipboard.writeText(ta.value || '').then(function () { toast('已复制译文'); });
+      navigator.clipboard.writeText(ta.value || u.source).then(function () { toast('已复制'); });
     });
-    tools.appendChild(aiBtn);
-    tools.appendChild(copyBtn);
-    wrap.appendChild(tools);
-    translationCell.appendChild(wrap);
+    aiBtn.addEventListener('click', function () { aiTranslate(u.i, aiBtn); });
 
-    row.appendChild(indexCell);
-    row.appendChild(sourceCell);
-    row.appendChild(translationCell);
+    row.appendChild(head);
+    row.appendChild(source);
+    row.appendChild(wrap);
     return row;
   }
 
-  function buildSource(u) {
-    var box = document.createElement('div');
-    box.className = 'source';
-    box.textContent = u.source;
-    box.title = '双击可修改原文';
-    box.addEventListener('dblclick', function () {
-      var ta = document.createElement('textarea');
-      ta.className = 'source-edit';
-      ta.value = u.source;
-      ta.addEventListener('blur', function () {
-        var text = ta.value;
-        api('api/unit', { method: 'POST', body: JSON.stringify({ docId: state.doc.id, index: u.i, source: text }) })
-          .then(function () { u.source = text; box.textContent = text; box.style.display = ''; if (ta.parentNode) ta.remove(); })
-          .catch(function (e) { toast('保存原文失败：' + e.message); });
-      });
-      box.style.display = 'none';
-      box.parentNode.insertBefore(ta, box.nextSibling);
-      ta.focus();
+  function editSource(u, box) {
+    var ta = document.createElement('textarea');
+    ta.className = 'source-edit';
+    ta.value = u.source;
+    var commit = function () {
+      var text = ta.value;
+      if (text === u.source) { restore(); return; }
+      api('api/unit', { method: 'POST', body: JSON.stringify({ docId: state.doc.id, index: u.i, source: text }) })
+        .then(function () { u.source = text; restore(); })
+        .catch(function (e) { toast('保存原文失败：' + e.message); });
+    };
+    var restore = function () {
+      box.textContent = u.source;
+      box.style.display = '';
+      if (ta.parentNode) ta.remove();
+    };
+    ta.addEventListener('blur', commit);
+    ta.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { ta.value = u.source; ta.blur(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') ta.blur();
     });
-    return box;
+    box.style.display = 'none';
+    box.parentNode.insertBefore(ta, box.nextSibling);
+    ta.focus();
   }
 
   function highlight() {
@@ -252,7 +283,7 @@
     }
   }
 
-  // ---------- 保存 / AI ----------
+  // ---------------- 保存 / AI ----------------
 
   function saveUnit(index, patch) {
     var body = Object.assign({ docId: state.doc.id, index: index }, patch);
@@ -265,10 +296,20 @@
           state.doc.total = res.total;
         }
         updateProgress();
+        updateDocSummary();
         return res;
       })
       .catch(function (e) { toast('保存失败：' + e.message); })
       .finally(function () { state.saving--; });
+  }
+
+  function updateDocSummary() {
+    if (!state.doc) return;
+    var item = state.docs.find(function (d) { return d.id === state.doc.id; });
+    if (!item) return;
+    item.done = state.doc.done;
+    item.total = state.doc.total;
+    renderDocs();
   }
 
   function applyLocal(index, patch) {
@@ -279,32 +320,30 @@
     if (typeof patch.starred === 'boolean') unit.starred = patch.starred;
     if (typeof patch.done === 'boolean') unit.done = patch.done;
     unit.done = unit.done || !!unit.translation.trim();
-    if (state.filter !== 'all' || state.query) renderDoc();
-    else {
-      var row = document.querySelector('.row[data-index="' + index + '"]');
-      if (row) {
-        var dot = row.querySelector('.dot');
-        if (dot) dot.className = 'dot ' + (unit.done ? 'done' : '');
-        var star = row.querySelector('.star');
-        if (star) { star.textContent = unit.starred ? '★' : '☆'; star.className = 'star' + (unit.starred ? ' on' : ''); }
-      }
+    var row = document.querySelector('.row[data-index="' + index + '"]');
+    if (row) {
+      var dot = row.querySelector('.dot');
+      if (dot) dot.className = 'dot' + (unit.done ? ' done' : '');
+      var star = row.querySelector('.star');
+      if (star) { star.textContent = unit.starred ? '★' : '☆'; star.className = 'star' + (unit.starred ? ' on' : ''); }
     }
   }
 
   function aiTranslate(index, button) {
-    if (button) { button.disabled = true; button.textContent = '…'; }
+    if (button) { button.disabled = true; button.textContent = '翻译中…'; }
     return api('api/ai', { method: 'POST', body: JSON.stringify({ docId: state.doc.id, index: index }) })
       .then(function (res) {
         if (!res.ok) throw new Error(res.error || '翻译失败');
         var unit = state.doc.units.find(function (u) { return u.i === index; });
         unit.translation = res.text;
         unit.done = true;
-        state.doc.done = res.done;
+        if (typeof res.done === 'number') { state.doc.done = res.done; state.doc.total = res.total; }
         updateProgress();
+        updateDocSummary();
         var row = document.querySelector('.row[data-index="' + index + '"]');
         if (row) {
           var ta = row.querySelector('textarea.translation');
-          if (ta) { ta.value = res.text; }
+          if (ta) ta.value = res.text;
           var dot = row.querySelector('.dot');
           if (dot) dot.className = 'dot done';
         }
@@ -313,7 +352,7 @@
       })
       .catch(function (e) { toast('AI 翻译失败：' + e.message); })
       .finally(function () {
-        if (button) { button.disabled = false; button.textContent = 'AI'; }
+        if (button) { button.disabled = false; button.textContent = 'AI 翻译'; }
       });
   }
 
@@ -325,9 +364,10 @@
     updateProgress();
     (function next(i) {
       if (state.batch.stop || i >= pending.length) {
+        var stopped = state.batch.stop;
         state.batch.running = false;
         updateProgress();
-        toast(state.batch.stop ? '已停止批量翻译' : '批量翻译完成');
+        toast(stopped ? '已停止批量翻译' : '批量翻译完成');
         return;
       }
       aiTranslate(pending[i].i, null).then(function () {
@@ -338,7 +378,19 @@
     })(0);
   }
 
-  // ---------- 事件绑定 ----------
+  // ---------------- 设置弹窗 ----------------
+
+  function openSettings() {
+    $('settingsMask').hidden = false;
+    $('infoMode').textContent = state.info ? (state.info.mode || '—') : '—';
+    $('infoVersion').textContent = state.info ? state.info.version : '—';
+    $('infoModel').textContent = state.info && state.info.provider ? state.info.provider : '未配置';
+    $('infoLang').textContent = state.info ? state.info.targetLang : '—';
+    $('infoDocs').textContent = state.docs.length + ' 篇';
+    $('infoToken').textContent = TOKEN ? '已启用' : '未设置';
+  }
+
+  function closeSettings() { $('settingsMask').hidden = true; }
 
   function bind() {
     $('docSearch').addEventListener('input', function (e) { state.docQuery = e.target.value; renderDocs(); });
@@ -354,8 +406,8 @@
     $('btnBatch').addEventListener('click', runBatch);
     $('btnExport').addEventListener('click', function () {
       if (!state.doc) return;
-      var url = 'api/export?id=' + encodeURIComponent(state.doc.id) + '&format=txt_bilingual&token=' + encodeURIComponent(TOKEN);
-      window.open(url, '_blank');
+      window.open('api/export?id=' + encodeURIComponent(state.doc.id) +
+        '&format=txt_bilingual&token=' + encodeURIComponent(TOKEN), '_blank');
     });
     $('btnMode').addEventListener('click', function () {
       if (!state.doc) return;
@@ -364,17 +416,41 @@
         .then(function () { openDoc(state.doc.id); toast('已切换为' + (next === 'SENTENCE' ? '逐句' : '逐行')); })
         .catch(function (e) { toast('切换失败：' + e.message); });
     });
+
+    $('btnSettings').addEventListener('click', openSettings);
+    $('btnCloseSettings').addEventListener('click', closeSettings);
+    $('settingsMask').addEventListener('click', function (e) {
+      if (e.target === $('settingsMask')) closeSettings();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeSettings();
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('#themeCards .theme-card'), function (card) {
+      card.addEventListener('click', function () { applyTheme(card.dataset.theme); });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('#settingsNav button'), function (btn) {
+      btn.addEventListener('click', function () {
+        Array.prototype.forEach.call(document.querySelectorAll('#settingsNav button'), function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        ['general', 'conn', 'about'].forEach(function (name) {
+          $('pane-' + name).hidden = name !== btn.dataset.pane;
+        });
+      });
+    });
     window.addEventListener('beforeunload', function (e) {
       if (state.saving > 0) { e.preventDefault(); e.returnValue = ''; }
     });
   }
 
-  // ---------- 启动 ----------
+  // ---------------- 启动 ----------------
+
+  initTheme();
+  bind();
 
   api('api/info').then(function (info) {
     state.info = info;
-    $('serverInfo').textContent = info.name + ' · ' + info.version + (info.mode ? '（' + info.mode + '）' : '');
-    if (info.targetLang) $('docSub').textContent = '目标语言：' + info.targetLang;
+    $('serverInfo').textContent = (info.mode || '网页翻译台') + ' · v' + info.version;
+    if (info.targetLang) $('dockHint').textContent = '目标语言 ' + info.targetLang + ' · 输入即自动保存';
     setConn('已连接', true);
     return api('api/docs');
   }).then(function (res) {
@@ -383,9 +459,6 @@
     if (state.docs.length) openDoc(state.docs[0].id);
   }).catch(function (e) {
     setConn('连接失败', false);
-    toast('无法连接服务：' + e.message +
-      '（若手机端设置了访问令牌，请在网址后加 ?token=你的令牌）');
+    toast('无法连接服务：' + e.message + '（若手机端设置了访问令牌，请在网址后加 ?token=你的令牌）');
   });
-
-  bind();
 })();

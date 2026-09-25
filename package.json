@@ -1,6 +1,6 @@
 {
   "name": "line-trans-web",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "LineTrans 网页翻译台服务端：在电脑/NAS 上提供与安卓客户端一致的翻译编辑与 AI 翻译接口",
   "type": "module",
   "main": "server.js",
