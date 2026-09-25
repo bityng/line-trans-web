@@ -76,6 +76,8 @@ html[data-theme="dark"] {
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
+/* hidden 属性优先：否则被下面的 display 规则覆盖（设置弹窗会一直显示） */
+[hidden] { display: none !important; }
 body {
   margin: 0;
   font-family: var(--font);

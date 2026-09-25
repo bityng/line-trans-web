@@ -358,7 +358,20 @@ function readBody(req) {
   });
 }
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.ico': 'image/x-icon' };
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon'
+};
+
+const STATIC_FILES = new Set([
+  'index.html', 'app.js', 'style.css', 'icon.svg',
+  'icon-192.png', 'icon-512.png', 'manifest.json'
+]);
 
 function serveStatic(res, name) {
   const file = path.join(PUBLIC_DIR, name);
@@ -495,9 +508,8 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (url.pathname === '/' || url.pathname === '/index.html') return serveStatic(res, 'index.html');
-  if (url.pathname === '/app.js') return serveStatic(res, 'app.js');
-  if (url.pathname === '/style.css') return serveStatic(res, 'style.css');
+  const name = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\/+/, '');
+  if (STATIC_FILES.has(name)) return serveStatic(res, name);
   if (url.pathname === '/health') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('ok'); }
 
   res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });

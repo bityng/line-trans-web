@@ -128,10 +128,19 @@
     $('progressText').textContent = state.doc.done + ' / ' + state.doc.total + ' · ' + p + '%';
     $('btnMode').textContent = state.doc.unitMode === 'SENTENCE' ? '逐句' : '逐行';
     var remaining = state.doc.total - state.doc.done;
-    $('btnBatch').textContent = state.batch.running
-      ? '停止（' + state.batch.done + '/' + state.batch.total + '）'
-      : 'AI 翻译剩余 ' + remaining;
-    $('btnBatch').disabled = false;
+    var canTranslate = !!(state.info && state.info.canTranslate);
+    if (state.batch.running) {
+      $('btnBatch').textContent = '停止（' + state.batch.done + '/' + state.batch.total + '）';
+      $('btnBatch').disabled = false;
+    } else if (!canTranslate) {
+      $('btnBatch').textContent = '未配置模型';
+      $('btnBatch').disabled = true;
+      $('btnBatch').title = '请先在服务端配置 provider.baseUrl / apiKey / model（手机端：设置 → AI 翻译）';
+    } else {
+      $('btnBatch').textContent = 'AI 翻译剩余 ' + remaining;
+      $('btnBatch').disabled = remaining === 0;
+      $('btnBatch').title = '';
+    }
   }
 
   function visibleUnits() {
@@ -358,6 +367,10 @@
 
   function runBatch() {
     if (state.batch.running) { state.batch.stop = true; return; }
+    if (!state.info || !state.info.canTranslate) {
+      toast('还没有配置 AI 模型，无法批量翻译');
+      return;
+    }
     var pending = state.doc.units.filter(function (u) { return !u.done; });
     if (!pending.length) { toast('没有待翻译内容'); return; }
     state.batch = { running: true, stop: false, done: 0, total: pending.length };
@@ -370,7 +383,13 @@
         toast(stopped ? '已停止批量翻译' : '批量翻译完成');
         return;
       }
-      aiTranslate(pending[i].i, null).then(function () {
+      aiTranslate(pending[i].i, null).then(function (res) {
+        if (!res || res.ok === false) {
+          // 出错就停下来，避免一路报错刷屏
+          state.batch.running = false;
+          updateProgress();
+          return;
+        }
         state.batch.done++;
         updateProgress();
         next(i + 1);
