@@ -20,7 +20,8 @@ LineTrans 的网页端 / 局域网服务端：**零依赖 Node.js**，在浏览�
 | 位置 | 说明 |
 | --- | --- |
 | `server.js` `splitSentences()` | 逐句切分，规则必须与安卓 `util/TextParser.kt` 一致（见项目文档 §5） |
-| `server.js` `handleApi()` | 全部 API：`/api/info`、`/api/docs`、`/api/doc`、`/api/unit`、`/api/ai`、`/api/export` |
+| `server.js` `handleApi()` | 全部 API：`/api/info`、`/api/docs`、`/api/doc`、`/api/unit`、`/api/ai`、`/api/export`、`/api/lookup`、`/api/dict` |
+| `dict/core.tsv`、`dict/lemma.tsv` | 随本仓库分发的离线词库：40,000 词条 / 101,909 条词形映射，与安卓端 `assets/dict/` 同源 |
 | `public/app.js` | 分窗口渲染（每批 60 句，IntersectionObserver 续加载）——**不要改成一次性全渲染** |
 | `public/style.css` | 设计变量 + `[hidden] { display: none !important }`（删了设置弹窗会常驻） |
 
