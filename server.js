@@ -11,6 +11,8 @@
  *   POST /api/doc              修改文档（名称、文件夹、逐行/逐句）
  *   POST /api/ai               用配置的模型翻译一句
  *   GET  /api/export?id&format 导出对照文本
+ *   GET  /api/lookup?word&lang&ai 划词查义（本地离线词库，可选 AI 兜底）
+ *   GET  /api/dict             离线词库状态
  *
  * 零依赖，Node 18+ 直接运行：node server.js
  */
@@ -27,6 +29,10 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = path.join(ROOT, 'data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const IMPORT_DIR = path.join(ROOT, 'docs');
+const DICT_DIR = path.join(ROOT, 'dict');
+const DICT_CORE_FILE = path.join(DICT_DIR, 'core.tsv');
+const DICT_LEMMA_FILE = path.join(DICT_DIR, 'lemma.tsv');
+const DICT_IMPORT_FILE = path.join(DICT_DIR, 'dict-import.tsv');
 const VERSION = '1.5.0';
 
 // 文本清洗/切分用到的正则（在数据初始化前就要能用到）
@@ -56,6 +62,10 @@ function loadConfig() {
     contextUnits: Number(cfg.contextUnits ?? 3),
     systemPrompt: cfg.systemPrompt || '你是专业翻译。请把用户提供的内容从 {sourceLang} 翻译成 {targetLang}。只输出译文，不要解释，不要添加多余内容，保持原有格式与换行。',
     glossary: cfg.glossary || '',
+    // 查词释义语言：zh（默认，中文）/ both（中英）/ en（英文）；非法值按 zh 处理
+    definitionLanguage: ['zh', 'both', 'en'].includes(cfg.definitionLanguage) ? cfg.definitionLanguage : 'zh',
+    // 划词查义：本地词库未命中时是否允许 AI 兜底（需要先配好 provider）
+    lookup: { aiFallback: !!(cfg.lookup && cfg.lookup.aiFallback) },
     provider: cfg.provider || { type: 'openai', baseUrl: '', apiKey: '', model: '' }
   };
 }
@@ -432,6 +442,162 @@ function exportName(doc, format) {
   return base + '_对照.' + ext;
 }
 
+// ---------------- 离线词库（与安卓端 LocalDictionary 语义一致） ----------------
+
+/**
+ * 词库文件（与安卓端 assets/dict 同源，都由 LineTrans/tools/build-local-dict.mjs 从 ECDICT 生成）：
+ *   dict/core.tsv         常用词条：`单词 \t 音标 \t 中文释义`
+ *   dict/lemma.tsv        词形还原：`变形 \t 原形`（ran → run）
+ *   dict/dict-import.tsv  可选：用户导入的词典，命中时覆盖内置词条（文件不存在则忽略）
+ *
+ * 首次被 /api/lookup 或 /api/dict 请求时懒加载；并发请求 await 同一个 Promise，
+ * 不会拿到空结果。文件缺失时降级为「查不到」，不影响进程存活。
+ */
+const dictStore = {
+  loading: null,
+  ready: false,
+  error: '',
+  entries: 0,          // core.tsv 词条数
+  imported: 0,         // dict-import.tsv 词条数
+  lemmaCount: 0,       // 可用词形映射条数
+  words: new Map(),    // 单词 → { word, phonetic, meaning }
+  lemmas: new Map(),   // 变形 → 原形
+  importedWords: new Set()
+};
+
+/** 解析一行 `单词 \t [音标 \t] 释义`（与安卓 LocalDictionary.parseLine 一致：至少两列）。返回词条键，未解析成功返回 null。 */
+function parseDictLine(line, target) {
+  if (!line || line.startsWith('#')) return null;
+  const parts = line.split('\t');
+  if (parts.length < 2) return null;
+  const word = parts[0].trim().toLowerCase();
+  if (!word) return null;
+  const phonetic = parts.length >= 3 ? parts[1].trim() : '';
+  const meaning = (parts.length >= 3 ? parts.slice(2).join(' ') : parts[1]).trim();
+  if (!meaning) return null;
+  target.set(word, { word, phonetic, meaning });   // 后写入的覆盖先写入的：用户导入覆盖内置
+  return word;
+}
+
+/** 懒加载词库；重复调用复用同一个 Promise。所有异常都在内部消化，永不 reject。 */
+function loadDict() {
+  if (dictStore.loading) return dictStore.loading;
+  dictStore.loading = (async () => {
+    const words = new Map();
+    const lemmas = new Map();
+    const importedWords = new Set();
+    const missing = [];
+    let entries = 0;
+    let imported = 0;
+
+    try {
+      const text = await fs.promises.readFile(DICT_CORE_FILE, 'utf8');
+      for (const line of text.split('\n')) if (parseDictLine(line, words)) entries++;
+    } catch (e) {
+      missing.push('core.tsv（' + (e.code || e.message) + '）');
+    }
+
+    try {
+      const text = await fs.promises.readFile(DICT_LEMMA_FILE, 'utf8');
+      for (const line of text.split('\n')) {
+        if (!line || line.startsWith('#')) continue;
+        const parts = line.split('\t');
+        if (parts.length < 2) continue;
+        const form = parts[0].trim().toLowerCase();
+        const base = parts[1].trim().toLowerCase();
+        if (form && base) lemmas.set(form, base);
+      }
+    } catch (e) {
+      missing.push('lemma.tsv（' + (e.code || e.message) + '）');
+    }
+
+    try {
+      const text = await fs.promises.readFile(DICT_IMPORT_FILE, 'utf8');
+      for (const line of text.split('\n')) {
+        const word = parseDictLine(line, words);
+        if (word) { imported++; importedWords.add(word); }
+      }
+    } catch { /* 导入词典是可选的，文件不存在不算错误 */ }
+
+    dictStore.words = words;
+    dictStore.lemmas = lemmas;
+    dictStore.importedWords = importedWords;
+    dictStore.entries = entries;
+    dictStore.imported = imported;
+    dictStore.lemmaCount = lemmas.size;
+    dictStore.error = missing.length ? '词库文件缺失：' + missing.join('、') : '';
+    dictStore.ready = !missing.length;
+    return dictStore;
+  })().catch((e) => {
+    dictStore.error = '词库加载失败：' + e.message;
+    dictStore.ready = false;
+    return dictStore;
+  });
+  return dictStore.loading;
+}
+
+/** 取词清洗：与安卓 LocalDictionary.lookup 完全一致（trim → 去掉首尾非字母且非 - ' 的字符 → 转小写） */
+function normalizeWord(raw) {
+  const chars = Array.from(String(raw === null || raw === undefined ? '' : raw).trim());
+  const isEdge = (c) => c !== '-' && c !== "'" && !/\p{L}/u.test(c);
+  let start = 0;
+  let end = chars.length;
+  while (start < end && isEdge(chars[start])) start++;
+  while (end > start && isEdge(chars[end - 1])) end--;
+  return chars.slice(start, end).join('').toLowerCase();
+}
+
+/** 规则变形表：与安卓 LocalDictionary.variants 逐条一致（判断顺序也一致） */
+function wordVariants(word) {
+  const out = [];
+  const add = (w) => { if (w.length >= 2 && w !== word) out.push(w); };
+  if (word.endsWith('ies') && word.length > 4) add(word.slice(0, -3) + 'y');
+  if (word.endsWith('es') && word.length > 3) add(word.slice(0, -2));
+  if (word.endsWith('s') && word.length > 2) add(word.slice(0, -1));
+  if (word.endsWith('ing') && word.length > 5) { add(word.slice(0, -3)); add(word.slice(0, -3) + 'e'); }
+  if (word.endsWith('ed') && word.length > 4) { add(word.slice(0, -2)); add(word.slice(0, -1)); }
+  if (word.endsWith('er') && word.length > 4) { add(word.slice(0, -2)); add(word.slice(0, -1)); }
+  if (word.endsWith('est') && word.length > 5) add(word.slice(0, -3));
+  if (word.endsWith('ly') && word.length > 4) add(word.slice(0, -2));
+  return out;
+}
+
+/** 本地查词：直接命中 → lemma 词形还原 → 规则变形（顺序与安卓 LocalDictionary.lookup 一致） */
+function localLookup(word) {
+  const direct = dictStore.words.get(word);
+  if (direct) return { entry: direct, matched: word, via: 'direct' };
+  const lemmaBase = dictStore.lemmas.get(word);
+  if (lemmaBase) {
+    const entry = dictStore.words.get(lemmaBase);
+    if (entry) return { entry, matched: lemmaBase, via: 'lemma' };
+  }
+  for (const variant of wordVariants(word)) {
+    const hit = dictStore.words.get(variant);
+    if (hit) return { entry: hit, matched: variant, via: 'variant' };
+    const base = dictStore.lemmas.get(variant);
+    if (base) {
+      const entry = dictStore.words.get(base);
+      if (entry) return { entry, matched: base, via: 'variant' };
+    }
+  }
+  return null;
+}
+
+/** AI 兜底释义：复用 callModel，费用口径与 /api/ai 一致（costOf） */
+async function aiLookup(word, lang) {
+  const rule = lang === 'en'
+    ? '用简明英文给出释义。'
+    : lang === 'both'
+      ? '先给出中文释义，再换行给出对应的英文释义。'
+      : '给出简明中文释义，并标注词性（如 n. / v. / adj.）。';
+  const system = '你是英汉词典。用户会给你一个英语单词，请' + rule +
+    '只输出释义本身：不要例句，不要解释，不要重复单词，不要客套话。';
+  const result = await callModel(system, word);
+  const text = String(result.text || '').trim();
+  if (!text) return null;
+  return { text, cost: costOf(result.promptTokens, result.completionTokens) };
+}
+
 // ---------------- HTTP ----------------
 
 function sendJson(res, code, value) {
@@ -579,6 +745,70 @@ async function handleApi(req, res, url, payload) {
       return res.end(body);
     }
 
+    case '/api/lookup': {
+      const word = normalizeWord(p.get('word'));
+      if (!word) return sendJson(res, 200, { ok: false, error: 'word 不能为空' });
+      const query = word.length > 64 ? word.slice(0, 64) : word;   // 超长词直接截断
+      const langParam = p.get('lang');
+      const lang = langParam === 'zh' || langParam === 'both' || langParam === 'en'
+        ? langParam
+        : (langParam === null ? config.definitionLanguage : 'zh');   // 非法值按 zh
+
+      await loadDict();   // 首次请求时懒加载，加载中的请求会等到加载完成再返回
+
+      const hit = localLookup(query);
+      if (hit) {
+        return sendJson(res, 200, {
+          ok: true,
+          word: query,
+          found: true,
+          matched: hit.matched,
+          via: hit.via,
+          phonetic: hit.entry.phonetic,
+          meaning: hit.entry.meaning,
+          source: dictStore.importedWords.has(hit.entry.word) ? 'import' : 'local'
+        });
+      }
+
+      const aiParam = p.get('ai');
+      const allowAi = aiParam === '1' ? true : aiParam === '0' ? false : !!config.lookup.aiFallback;
+      if (allowAi && config.provider && config.provider.baseUrl && config.provider.model) {
+        try {
+          const ai = await aiLookup(query, lang);
+          if (ai) {
+            return sendJson(res, 200, {
+              ok: true,
+              word: query,
+              found: true,
+              matched: query,
+              via: 'ai',
+              phonetic: '',
+              meaning: ai.text,
+              source: 'ai',
+              cost: ai.cost
+            });
+          }
+        } catch (e) {
+          console.error('[查词] AI 兜底失败：' + e.message);   // 兜底失败不影响本地查询结果
+        }
+      }
+
+      return sendJson(res, 200, { ok: true, word: query, found: false, matched: null, via: null, source: 'none' });
+    }
+
+    case '/api/dict': {
+      await loadDict();
+      const body = {
+        ok: true,
+        ready: dictStore.ready,
+        entries: dictStore.entries,
+        lemma: dictStore.lemmaCount,
+        imported: dictStore.imported
+      };
+      if (dictStore.error) body.error = dictStore.error;
+      return sendJson(res, 200, body);
+    }
+
     default:
       return sendJson(res, 404, { error: 'unknown api' });
   }
@@ -618,4 +848,13 @@ server.listen(config.port, config.host, () => {
   if (!fs.existsSync(path.join(ROOT, 'config.json'))) {
     console.log('  提示：  复制 config.example.json 为 config.json 并填入 API Key 即可使用 AI 翻译');
   }
+  // 词库放到 listen 之后再异步预加载：4MB 词库读取不阻塞端口绑定
+  setImmediate(() => {
+    const started = Date.now();
+    loadDict().then(() => {
+      console.log('  词库：  ' + (dictStore.ready
+        ? dictStore.entries + ' 词条、' + dictStore.lemmaCount + ' 条词形映射、' + dictStore.imported + ' 条导入（加载 ' + (Date.now() - started) + 'ms）'
+        : '未就绪（' + dictStore.error + '）'));
+    });
+  });
 });

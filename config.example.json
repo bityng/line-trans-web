@@ -1,4 +1,5 @@
 {
+  "_注释": "definitionLanguage：划词查义的释义语言，zh（默认，中文）/ both（中英）/ en（英文）；lookup.aiFallback：本地词库未命中时是否允许用 AI 兜底生成释义，默认 false（需先配置 provider）。另外 /api/lookup 支持用 ai=1 / ai=0 查询参数临时覆盖 aiFallback。以下划线开头的键会被服务端忽略。",
   "host": "0.0.0.0",
   "port": 8787,
   "token": "",
@@ -8,6 +9,10 @@
   "contextUnits": 3,
   "systemPrompt": "你是专业翻译。请把用户提供的内容从 {sourceLang} 翻译成 {targetLang}。只输出译文，不要解释，不要添加多余内容，保持原有格式与换行。",
   "glossary": "",
+  "definitionLanguage": "zh",
+  "lookup": {
+    "aiFallback": false
+  },
   "provider": {
     "type": "openai",
     "baseUrl": "https://api.deepseek.com",

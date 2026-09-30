@@ -25,6 +25,7 @@
 - 支持收藏，按「全部 / 未完成 / 收藏」筛选，按原文或译文搜索
 - 双击原文即可修改原文；支持逐行 / 逐句切换（按原文重新切分，保留已有译文）
 - 导出对照 TXT / Markdown / CSV / JSON
+- **划词查义**：点原文 / 译文里的单词即弹释义浮层，用的是随仓库分发的离线词库（ECDICT），不联网、秒出
 - 所有改动实时写入数据文件；使用安卓内置服务时，手机与电脑共享同一份数据
 - 安卓客户端在 [line-trans-android](https://github.com/bityng/line-trans-android)，
   它的 `app/src/main/assets/web/` 与本仓库 `public/` 保持一致
@@ -77,6 +78,8 @@ LineTrans 网页翻译台 v1.4.0 已启动
 | `systemPrompt` | 系统提示词，支持 `{sourceLang}` `{targetLang}` `{docName}` `{mode}` `{glossary}` |
 | `glossary` | 术语表，每行一条 `原文=译文`，翻译时强制使用 |
 | `contextUnits` | 携带前文参考的句数 |
+| `definitionLanguage` | 划词查义的释义语言：`zh`（默认）/ `both` / `en`，非法值按 `zh` |
+| `lookup.aiFallback` | 本地词库没查到词时是否用 AI 兜底生成释义，默认 `false`（需先配好 `provider`） |
 | `provider.type` | `openai`（OpenAI 兼容）或 `anthropic` |
 | `provider.baseUrl` / `apiKey` / `model` | 接口地址、密钥与模型名 |
 | `provider.inputPrice` / `outputPrice` | 每百万 token 价格，用于费用估算（可留 0） |
@@ -96,6 +99,80 @@ LineTrans 网页翻译台 v1.4.0 已启动
 | POST | `/api/doc` | 修改文档：`{docId,name?,folder?,pinned?,unitMode?}` |
 | POST | `/api/ai` | 翻译一句：`{docId,index}` |
 | GET | `/api/export?id=ID&format=txt_bilingual` | 导出：`txt_bilingual` / `txt_translated` / `txt_source` / `md` / `csv` / `json` |
+| GET | `/api/lookup?word=WORD&lang=zh&ai=1` | 划词查义：查离线词库，可选 AI 兜底（见下方「划词查义」） |
+| GET | `/api/dict` | 离线词库状态：`{ok,ready,entries,lemma,imported}` |
+
+## 划词查义（离线词库）
+
+在原文或译文里点一个单词，就会在该词上方弹出释义浮层。释义来自**随仓库一起分发的离线词库**，
+不联网、秒出，跟安卓端用的是同一份数据。
+
+### 词库文件
+
+| 文件 | 说明 |
+| --- | --- |
+| `dict/core.tsv` | 常用词条 4 万条，每行 `单词 \t 音标 \t 中文释义` |
+| `dict/lemma.tsv` | 词形还原表，每行 `变形 \t 原形`（`ran → run`、`went → go`） |
+| `dict/dict-import.tsv` | **可选**，自己导入的词典，格式同 `core.tsv`；同名条目会覆盖内置词条，改完重启生效 |
+
+- 数据来源：[ECDICT](https://github.com/skywind3000/ECDICT)（**MIT 许可**），由安卓仓库的
+  `tools/build-local-dict.mjs` 从 `ecdict.csv` + `lemma.en.txt` 生成。
+  本项目代码遵循 AGPL-3.0-or-later，**词典数据部分仍遵循 MIT**。
+- 与安卓端 `app/src/main/assets/dict/` 是同一份文件，查询语义（直接命中 → 词形还原 → 规则变形）
+  与安卓 `LocalDictionary` 完全一致。
+- 词库在**首次调用 `/api/lookup` 或 `/api/dict` 时懒加载**（本机实测 1~3 秒，取决于磁盘），之后常驻内存；
+  文件缺失不会让服务崩溃，只是查不到词 —— `/api/dict` 会返回 `ready:false` 并带 `error` 说明。
+
+### 查词顺序
+
+1. `dict/dict-import.tsv` 用户导入词典（覆盖内置条目）→ `source:"import"`
+2. `dict/core.tsv` 直接命中 → `via:"direct"`，`source:"local"`
+3. `dict/lemma.tsv` 词形还原后命中原形 → `via:"lemma"`
+4. 规则变形（`ies / es / s / ing / ed / er / est / ly`）后命中 → `via:"variant"`
+5. 仍未命中、且允许 AI 兜底、且已配置 `provider` → 让模型给中文释义 → `source:"ai"`
+6. 否则 `found:false`，`source:"none"`
+
+### GET /api/lookup
+
+| 参数 | 说明 |
+| --- | --- |
+| `word` | 必填。服务端会清洗：去首尾空白 → 去掉首尾既不是字母、也不是 `-` 或 `'` 的字符 → 转小写；超过 64 个字符截断 |
+| `lang` | 可选，`zh`（默认）/ `both` / `en`，非法值按 `zh`；不传则用配置 `definitionLanguage` |
+| `ai` | 可选，`1` 允许 AI 兜底、`0` 禁止；不传则用配置 `lookup.aiFallback`（默认 `false`） |
+
+> 本地词库只存了中文释义，所以 `lang` 只影响 AI 兜底的输出语言，本地命中时始终返回中文释义。
+
+命中（`matched` 是真正命中的词条，`via` 说明是怎么命中的）：
+
+```json
+{ "ok":true, "word":"ran", "found":true, "matched":"run", "via":"lemma",
+  "phonetic":"rʌn", "meaning":"n. 跑, 赛跑…；run的过去式和过去分词", "source":"local" }
+```
+
+- `via`：`direct` / `lemma` / `variant`；AI 兜底时为 `ai`
+- `source`：`local` / `import` / `ai` / `none`
+- AI 兜底成功时额外带 `cost` 字段（与 `/api/ai` 同口径的费用估算）
+
+未命中时 **HTTP 仍然是 200**：
+
+```json
+{ "ok":true, "word":"zzz", "found":false, "matched":null, "via":null, "source":"none" }
+```
+
+`word` 清洗后为空（例如只传了 `...`）：
+
+```json
+{ "ok":false, "error":"word 不能为空" }
+```
+
+### GET /api/dict
+
+```json
+{ "ok":true, "ready":true, "entries":40000, "lemma":101909, "imported":0 }
+```
+
+`entries` = `core.tsv` 词条数，`lemma` = 可用词形映射条数，`imported` = `dict-import.tsv` 条数（文件不存在时为 0）。
+词库文件缺失时返回 `ready:false`，并多一个 `error` 字段说明缺了哪个文件。
 
 ## 部署到服务器（可选）
 
