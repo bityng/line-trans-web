@@ -33,7 +33,7 @@ const DICT_DIR = path.join(ROOT, 'dict');
 const DICT_CORE_FILE = path.join(DICT_DIR, 'core.tsv');
 const DICT_LEMMA_FILE = path.join(DICT_DIR, 'lemma.tsv');
 const DICT_IMPORT_FILE = path.join(DICT_DIR, 'dict-import.tsv');
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 
 // 文本清洗/切分用到的正则（在数据初始化前就要能用到）
 const TIMECODE = /^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->.*$/;
