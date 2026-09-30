@@ -291,6 +291,80 @@ textarea.source-edit {
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* ---------------- 划词查义浮层 ---------------- */
+.word-popup {
+  position: fixed; left: 12px; top: 12px; z-index: 55;
+  width: 320px; min-width: 240px; max-width: min(340px, calc(100vw - 24px));
+  padding: 12px 14px 10px;
+  background: var(--bg-layer-3);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-l);
+  color: var(--text-primary);
+}
+.wp-head { display: flex; align-items: baseline; gap: 8px; }
+.wp-word {
+  font-size: 17px; font-weight: 600; line-height: 1.3;
+  max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wp-phonetic {
+  flex: 1; min-width: 0; font-size: 12px; color: var(--text-caption);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wp-close { width: 26px; height: 26px; flex: 0 0 26px; font-size: 13px; align-self: flex-start; }
+.wp-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.wp-badge {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
+  border-radius: var(--pill); background: var(--brand-soft); color: var(--brand-text);
+  font-size: 11px; line-height: 1;
+}
+.wp-badge.note { background: var(--bg-layer-2); color: var(--text-caption); }
+.wp-status {
+  margin-top: 8px; font-size: 13px; color: var(--text-secondary);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.wp-status.error { color: var(--warn); }
+.wp-spinner {
+  width: 12px; height: 12px; flex: 0 0 12px; border-radius: 50%;
+  border: 2px solid var(--border-l3); border-top-color: var(--brand);
+  animation: wp-spin .7s linear infinite;
+}
+@keyframes wp-spin { to { transform: rotate(360deg); } }
+.wp-senses { margin-top: 8px; max-height: 240px; overflow: auto; }
+.wp-sense { display: flex; gap: 8px; padding: 3px 0; font-size: 13px; line-height: 1.6; }
+.wp-sense .wp-pos {
+  flex: 0 0 46px; text-align: left; color: var(--brand-text); font-size: 12px; padding-top: 2px;
+}
+.wp-sense .wp-def { flex: 1; min-width: 0; word-break: break-word; }
+.wp-sense .wp-def.dim { color: var(--text-caption); }
+.wp-link {
+  border: 0; padding: 0; background: transparent; color: var(--brand-text);
+  font-size: 12px; text-decoration: underline; cursor: pointer;
+}
+.wp-foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.wp-foot .tool { height: 28px; font-size: 12px; }
+
+/* 设置里的开关 / 下拉 */
+.switch { position: relative; display: inline-block; width: 40px; height: 22px; flex: 0 0 40px; }
+.switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.switch i {
+  position: absolute; inset: 0; border-radius: var(--pill);
+  background: var(--border-l3); transition: background .15s ease; pointer-events: none;
+}
+.switch i::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+  border-radius: 50%; background: #fff; box-shadow: var(--shadow-s);
+  transition: transform .15s ease;
+}
+.switch input:checked + i { background: var(--brand); }
+.switch input:checked + i::after { transform: translateX(18px); }
+.mini-select {
+  height: var(--control-s); padding: 0 8px; outline: none;
+  border: 1px solid var(--border-l2); border-radius: var(--radius-s);
+  background: var(--bg-base); color: var(--text-primary); font-size: 13px;
+}
+.mini-select:focus { border-color: var(--brand); }
+
 /* ---------------- 进度环 / 跳转 / 分组 ---------------- */
 .ring { position: relative; width: 36px; height: 36px; flex: 0 0 36px; }
 .ring svg { width: 36px; height: 36px; transform: rotate(-90deg); display: block; }
@@ -343,4 +417,5 @@ textarea.source-edit {
   .topbar { padding: 10px 14px; gap: 8px; }
   .jump { display: none; }
   .row-tools { flex-direction: row; }
+  .word-popup { width: auto; left: 12px !important; right: 12px; max-width: none; }
 }

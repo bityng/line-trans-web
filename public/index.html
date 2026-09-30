@@ -139,6 +139,24 @@
             <div class="kv"><span>逐句跳转</span><span>Ctrl/⌘ + Enter 下一句，Alt + ↑/↓ 上下句</span></div>
             <div class="kv"><span>自动保存</span><span>输入后 0.5 秒自动写入</span></div>
           </div>
+          <div class="field">
+            <label>划词查义</label>
+            <div class="kv"><span>启用划词查义</span>
+              <label class="switch"><input type="checkbox" id="optLookupEnabled" checked><i></i></label>
+            </div>
+            <div class="kv"><span>释义语言</span>
+              <select id="optDefinitionLang" class="mini-select">
+                <option value="zh">中文（推荐）</option>
+                <option value="both">中英对照</option>
+                <option value="en">英文</option>
+              </select>
+            </div>
+            <div class="kv"><span>查不到时用 AI 补全</span>
+              <label class="switch"><input type="checkbox" id="optLookupAi"><i></i></label>
+            </div>
+            <div class="kv"><span>我的词库</span><span id="wordbookCount">0 条</span></div>
+            <div class="kv"><span>操作提示</span><span>点击原文 / 译文中的单词，在词上方查看释义</span></div>
+          </div>
         </section>
 
         <section id="pane-conn" hidden>
@@ -161,6 +179,26 @@
         </section>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- 划词查义浮层 -->
+<div class="word-popup" id="wordPopup" role="dialog" aria-label="单词释义" hidden>
+  <div class="wp-head">
+    <span class="wp-word" id="wpWord"></span>
+    <span class="wp-phonetic" id="wpPhonetic" hidden></span>
+    <button class="icon-btn wp-close" id="wpClose" type="button" aria-label="关闭">✕</button>
+  </div>
+  <div class="wp-badges">
+    <span class="wp-badge" id="wpBadge" hidden></span>
+    <span class="wp-badge note" id="wpNote" hidden></span>
+  </div>
+  <div class="wp-status" id="wpStatus" hidden></div>
+  <div class="wp-senses" id="wpSenses" hidden></div>
+  <div class="wp-foot">
+    <button class="tool" id="wpCopy" type="button">复制释义</button>
+    <button class="tool" id="wpSave" type="button">加入我的词库</button>
+    <button class="tool" id="wpRetry" type="button">重查</button>
   </div>
 </div>
 

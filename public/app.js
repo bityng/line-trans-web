@@ -209,6 +209,7 @@
   /** 分窗口渲染：默认 60 句，滚到底部自动加载下一批（长文档不再卡） */
   function renderWindow(reset) {
     if (reset) {
+      closeLookup();
       editor.innerHTML = '';
       state.windowStart = 0;
       $('editorEmpty').hidden = state.filtered.length > 0;
@@ -332,6 +333,7 @@
   }
 
   function editSource(u, box) {
+    closeLookup();
     var ta = document.createElement('textarea');
     ta.className = 'source-edit';
     ta.value = u.source;
@@ -515,9 +517,681 @@
     })(0);
   }
 
+// ---------------- 划词查义 ----------------
+
+  var LOOKUP_KEY = 'lt-word-lookup';
+  var WORDBOOK_KEY = 'lt-wordbook';
+  var LOOKUP_CACHE_MAX = 200;
+
+  var lookupSettings = { enabled: true, definitionLanguage: 'zh', aiFallback: false };
+  var lookupCache = new Map();
+  var wordbook = {};
+  var popupEl = null;
+  var popupWord = '';
+  var lookupSeq = 0;
+  var current = null;
+
+  /** 与安卓 LocalDictionary 的 \p{L} 判定保持一致（老内核退回近似区间） */
+  var LETTER_RE = (function () {
+    try {
+      var re = new RegExp('\\p{L}', 'u');
+      if (re.test('a')) return re;
+    } catch (e) { /* 不支持 Unicode 属性转义 */ }
+    return /[0-9A-Za-z\u00AA-\u02FF\u0370-\u1FFF\u2C00-\uD7FF\uF900-\uFDFF\uFE70-\uFEFF]/;
+  })();
+  var HAN_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+  var KANA_RE = /[\u3040-\u30ff\uac00-\ud7af]/;
+  var LATIN_WORD_RE = /[A-Za-z][A-Za-z'-]*/g;
+
+  function loadLookupSettings() {
+    try {
+      var raw = localStorage.getItem(LOOKUP_KEY);
+      if (!raw) return;
+      var obj = JSON.parse(raw);
+      if (!obj || typeof obj !== 'object') return;
+      if (typeof obj.enabled === 'boolean') lookupSettings.enabled = obj.enabled;
+      if (obj.definitionLanguage === 'zh' || obj.definitionLanguage === 'both' || obj.definitionLanguage === 'en') {
+        lookupSettings.definitionLanguage = obj.definitionLanguage;
+      }
+      if (typeof obj.aiFallback === 'boolean') lookupSettings.aiFallback = obj.aiFallback;
+    } catch (e) { /* ignore */ }
+  }
+
+  function saveLookupSettings() {
+    try { localStorage.setItem(LOOKUP_KEY, JSON.stringify(lookupSettings)); } catch (e) { /* ignore */ }
+  }
+
+  function loadWordbook() {
+    try {
+      var raw = localStorage.getItem(WORDBOOK_KEY);
+      var obj = raw ? JSON.parse(raw) : null;
+      wordbook = (obj && typeof obj === 'object') ? obj : {};
+    } catch (e) { wordbook = {}; }
+  }
+
+  function updateWordbookCount() {
+    var el = $('wordbookCount');
+    if (el) el.textContent = Object.keys(wordbook).length + ' 条';
+  }
+
+  function saveWordbook() {
+    try { localStorage.setItem(WORDBOOK_KEY, JSON.stringify(wordbook)); } catch (e) { /* ignore */ }
+    updateWordbookCount();
+  }
+
+  /** 取词清洗：与安卓 LocalDictionary.lookup / 服务端规范化保持一致 */
+  function normalizeWord(raw) {
+    if (raw === null || raw === undefined) return '';
+    var text = String(raw).replace(/^\s+|\s+$/g, '');
+    var plain = function (ch) { return !LETTER_RE.test(ch) && ch !== '-' && ch !== "'"; };
+    var start = 0, end = text.length;
+    while (start < end && plain(text.charAt(start))) start++;
+    while (end > start && plain(text.charAt(end - 1))) end--;
+    return text.slice(start, end).toLowerCase();
+  }
+
+  /** 在文本 offset 处取词：拉丁词按词边界，假名 / 谚文取连续串，汉字取单字 */
+  function wordSpanAt(text, offset) {
+    if (!text) return null;
+    var i = offset;
+    if (i >= text.length) i = text.length - 1;
+    if (i < 0) return null;
+    var ch = text.charAt(i);
+    if (HAN_RE.test(ch)) return { start: i, end: i + 1 };
+    if (KANA_RE.test(ch)) {
+      var s = i, e = i + 1;
+      while (s > 0 && KANA_RE.test(text.charAt(s - 1))) s--;
+      while (e < text.length && KANA_RE.test(text.charAt(e))) e++;
+      return { start: s, end: e };
+    }
+    LATIN_WORD_RE.lastIndex = 0;
+    var m;
+    while ((m = LATIN_WORD_RE.exec(text)) !== null) {
+      if (m[0] === '') { LATIN_WORD_RE.lastIndex++; continue; }
+      if (i >= m.index && i < m.index + m[0].length) {
+        var word = m[0].replace(/[-']+$/, '');
+        if (!word) return null;
+        return { start: m.index, end: m.index + word.length };
+      }
+      if (m.index > i) break;
+    }
+    return null;
+  }
+
+  /** 光标定位：Chromium/WebKit 用 caretRangeFromPoint，Firefox 用 caretPositionFromPoint */
+  function caretRangeAtPoint(x, y) {
+    if (document.caretRangeFromPoint) {
+      try {
+        var r = document.caretRangeFromPoint(x, y);
+        if (r) return r;
+      } catch (e) { /* ignore */ }
+    }
+    if (document.caretPositionFromPoint) {
+      try {
+        var pos = document.caretPositionFromPoint(x, y);
+        if (pos && pos.offsetNode) {
+          var range = document.createRange();
+          var max = pos.offsetNode.nodeType === 3 ? pos.offsetNode.data.length : 0;
+          range.setStart(pos.offsetNode, Math.min(pos.offset, max));
+          range.collapse(true);
+          return range;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    return null;
+  }
+
+  /** 镜像层要复刻的排版属性（textarea 与普通文本的换行 / 字体必须一致） */
+  var MIRROR_PROPS = ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'fontStretch', 'fontVariant',
+    'letterSpacing', 'lineHeight', 'textTransform', 'textIndent', 'textAlign', 'wordSpacing', 'direction',
+    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+    'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+    'boxSizing', 'whiteSpace', 'wordBreak', 'overflowWrap', 'tabSize'];
+
+  /**
+   * Chromium 的 caretRangeFromPoint 命不中 textarea / input 内部（会落到最近的普通文本上），
+   * 因此点击译文时临时铺一层同排版的镜像层：把镜像放在 textarea 正上方，
+   * 用 caretRangeFromPoint 取偏移与词矩形，取完立刻移除（不给真实事件留下遮挡）。
+   */
+  function makeTextareaMirror(ta) {
+    var rect = ta.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    var cs = window.getComputedStyle(ta);
+    var mirror = document.createElement('div');
+    mirror.setAttribute('aria-hidden', 'true');
+    for (var i = 0; i < MIRROR_PROPS.length; i++) {
+      var prop = MIRROR_PROPS[i];
+      var value = cs[prop];
+      if (!value) continue;
+      try { mirror.style[prop] = value; } catch (err) { /* ignore */ }
+    }
+    mirror.style.position = 'fixed';
+    mirror.style.left = rect.left + 'px';
+    mirror.style.top = rect.top + 'px';
+    mirror.style.width = rect.width + 'px';
+    mirror.style.height = rect.height + 'px';
+    mirror.style.margin = '0';
+    mirror.style.color = 'transparent';
+    mirror.style.background = 'transparent';
+    mirror.style.overflow = 'hidden';
+    mirror.style.zIndex = '70';
+    mirror.textContent = ta.value;
+    document.body.appendChild(mirror);
+    try { mirror.scrollTop = ta.scrollTop; } catch (err) { /* ignore */ }
+    return mirror;
+  }
+
+  /** 在镜像层上取词：返回 { word, rect }（镜像已移除，rect 为视口坐标） */
+  function mirrorWordAt(ta, x, y) {
+    var mirror = makeTextareaMirror(ta);
+    if (!mirror) return null;
+    var out = null;
+    try {
+      var mr = caretRangeAtPoint(x, y);
+      var node = mr ? mr.startContainer : null;
+      if (node && node.nodeType === 3 && mirror.contains(node)) {
+        var text = mirror.textContent;
+        var span = wordSpanAt(text, mr.startOffset);
+        if (span) {
+          var word = normalizeWord(text.slice(span.start, span.end));
+          if (word) {
+            var rect = null;
+            try {
+              var r = document.createRange();
+              r.setStart(node, span.start);
+              r.setEnd(node, span.end);
+              var box = r.getBoundingClientRect();
+              if (box && (box.width || box.height)) rect = box;
+            } catch (err) { rect = null; }
+            out = { word: word, rect: rect };
+          }
+        }
+      }
+    } catch (err) { out = null; }
+    if (mirror.parentNode) mirror.remove();
+    return out;
+  }
+
+  /** 取词区域：原文 .source / 译文 textarea.translation，其它地方（按钮、输入框、弹窗）不响应 */
+  function lookupHostOf(el) {
+    while (el && el.nodeType === 1) {
+      if (el.classList) {
+        if (el.classList.contains('source')) return el;
+        if (el.tagName === 'TEXTAREA' && el.classList.contains('translation')) return el;
+      }
+      el = el.parentNode;
+    }
+    return null;
+  }
+
+  function textOfHost(host) {
+    return host.tagName === 'TEXTAREA' ? host.value : host.textContent;
+  }
+
+  /** 已有选区（长按 / 双击 / 拖选）：textarea 走 selectionStart，普通文本走 window.getSelection */
+  function selectedTextOf(host) {
+    if (host.tagName === 'TEXTAREA') {
+      var s = host.selectionStart, e = host.selectionEnd;
+      if (typeof s === 'number' && typeof e === 'number' && e > s) return host.value.slice(s, e);
+      return '';
+    }
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return '';
+    var range = sel.getRangeAt(0);
+    if (!host.contains(range.commonAncestorContainer)) return '';
+    return String(range);
+  }
+
+  function pointRect(x, y) {
+    return { left: x - 30, right: x + 30, top: y - 9, bottom: y + 9, width: 60, height: 18 };
+  }
+
+  function onEditorClick(e) {
+    if (!lookupSettings.enabled) return;
+    if (typeof e.button === 'number' && e.button !== 0) return;
+    var host = lookupHostOf(e.target);
+    if (!host) return;
+
+    var selected = selectedTextOf(host);
+    if (selected) {
+      var selWord = normalizeWord(selected);
+      if (selWord) {
+        var selRect = null;
+        var sel = window.getSelection ? window.getSelection() : null;
+        if (host.tagName !== 'TEXTAREA' && sel && sel.rangeCount) {
+          var box0 = sel.getRangeAt(0).getBoundingClientRect();
+          if (box0 && (box0.width || box0.height)) selRect = box0;
+        }
+        if (!selRect) selRect = pointRect(e.clientX, e.clientY);
+        showLookup(selWord, selRect, null);
+        return;
+      }
+    }
+
+    // 译文是 textarea：caretRangeFromPoint 命不中，走镜像层；失败再用点击后的光标位置兜底
+    if (host.tagName === 'TEXTAREA') {
+      var hit = mirrorWordAt(host, e.clientX, e.clientY);
+      if (hit) {
+        showLookup(hit.word, hit.rect || pointRect(e.clientX, e.clientY), null, true);
+        return;
+      }
+      var caret = host.selectionStart;
+      if (typeof caret !== 'number') return;
+      var fallbackSpan = wordSpanAt(textOfHost(host), caret);
+      if (!fallbackSpan) return;
+      var fallbackWord = normalizeWord(textOfHost(host).slice(fallbackSpan.start, fallbackSpan.end));
+      if (!fallbackWord) return;
+      showLookup(fallbackWord, pointRect(e.clientX, e.clientY), null, true);
+      return;
+    }
+
+    var range = caretRangeAtPoint(e.clientX, e.clientY);
+    var node = range ? range.startContainer : null;
+    if (!node || node.nodeType !== 3) return;
+    var root = node.getRootNode ? node.getRootNode() : null;
+    var inShadow = !!(root && root.host && root.host === host);
+    if (!inShadow && !host.contains(node)) return;
+
+    var text = textOfHost(host);
+    var span = wordSpanAt(text, range.startOffset);
+    if (!span) return;
+    var word = normalizeWord(text.slice(span.start, span.end));
+    if (!word) return;
+
+    var rect = null;
+    var liveRange = null;
+    try {
+      if (node.data.slice(span.start, span.end) === text.slice(span.start, span.end)) {
+        var r2 = document.createRange();
+        r2.setStart(node, span.start);
+        r2.setEnd(node, span.end);
+        var box = r2.getBoundingClientRect();
+        if (box && (box.width || box.height)) { rect = box; liveRange = r2; }
+      }
+    } catch (err) { rect = null; liveRange = null; }
+    if (!rect) rect = pointRect(e.clientX, e.clientY);
+    showLookup(word, rect, liveRange);
+  }
+
+  function lookupCacheGet(key) {
+    if (!lookupCache.has(key)) return null;
+    var value = lookupCache.get(key);
+    lookupCache.delete(key);
+    lookupCache.set(key, value);
+    return value;
+  }
+
+  function lookupCacheSet(key, value) {
+    if (lookupCache.has(key)) lookupCache.delete(key);
+    lookupCache.set(key, value);
+    while (lookupCache.size > LOOKUP_CACHE_MAX) {
+      lookupCache.delete(lookupCache.keys().next().value);
+    }
+  }
+
+  function showLookup(word, rect, liveRange, stale) {
+    if (!popupEl) return;
+    if (popupWord && popupWord === word && !popupEl.hidden) { closeLookup(); return; }
+    popupEl.hidden = false;
+    var key = word.toLowerCase();
+    var local = wordbook[key] || null;
+    var lang = lookupSettings.definitionLanguage;
+    current = { word: word, rect: rect, liveRange: liveRange || null, stale: !!stale, local: local, result: null, loading: false, error: '' };
+    popupWord = word;
+    var cached = local ? null : lookupCacheGet(key);
+    var cacheStale = !!(cached && !cached.found && !cached.aiTried && lookupSettings.aiFallback);
+    if (cached && cached.lang === lang && !cacheStale) {
+      current.result = cached;
+      renderLookup();
+      positionLookup();
+      return;
+    }
+    if (local) { renderLookup(); positionLookup(); return; }
+    requestLookup(false);
+  }
+
+  function requestLookup(forceAi) {
+    if (!current) return;
+    var word = current.word;
+    var key = word.toLowerCase();
+    var useAi = !!(forceAi || lookupSettings.aiFallback);
+    var lang = lookupSettings.definitionLanguage;
+    var mySeq = ++lookupSeq;
+    current.loading = true;
+    current.error = '';
+    if (!current.local) current.result = null;
+    renderLookup();
+    positionLookup();
+    api('api/lookup?word=' + encodeURIComponent(word) +
+        '&lang=' + encodeURIComponent(lang) +
+        '&ai=' + (useAi ? '1' : '0'))
+      .then(function (res) {
+        if (mySeq !== lookupSeq || !current) return;
+        if (!res || typeof res !== 'object') throw new Error('返回格式不正确');
+        if (normalizeWord(res.word || word) !== key) return;   // 回包不是这次查的词 → 丢弃
+        var result = {
+          found: !!res.found,
+          matched: res.matched || null,
+          via: res.via || null,
+          phonetic: res.phonetic || '',
+          meaning: res.meaning || '',
+          source: res.source || 'none',
+          cost: typeof res.cost === 'number' ? res.cost : null,
+          lang: lang,
+          aiTried: useAi
+        };
+        current.loading = false;
+        current.result = result;
+        if (res.ok === false) current.error = res.error || '查词失败';
+        lookupCacheSet(key, result);
+        renderLookup();
+        positionLookup();
+      })
+      .catch(function (e) {
+        if (mySeq !== lookupSeq || !current) return;
+        current.loading = false;
+        var msg = (e && e.message) ? String(e.message) : '查词失败';
+        if (msg.length > 80) msg = msg.slice(0, 80) + '…';
+        current.error = msg;
+        renderLookup();
+        positionLookup();
+      });
+  }
+
+  function currentMeaning() {
+    if (!current) return '';
+    if (current.local) return current.local.meaning || '';
+    var r = current.result;
+    return (r && r.found) ? (r.meaning || '') : '';
+  }
+
+  function currentPhonetic() {
+    if (!current) return '';
+    if (current.local && current.local.phonetic) return current.local.phonetic;
+    return (current.result && current.result.phonetic) || '';
+  }
+
+  function lookupPlainText() {
+    if (!current) return '';
+    var head = current.word;
+    var phonetic = currentPhonetic();
+    if (phonetic) head += ' ' + phonetic;
+    var meaning = currentMeaning();
+    return meaning ? head + '\n' + meaning : head;
+  }
+
+  /** 拆词性：'n. 跑步' → {pos:'n.', def:'跑步'}，无词性时占满整行 */
+  function parseSenses(meaning) {
+    if (!meaning) return [];
+    return String(meaning).split(/[；;\n]+/)
+      .map(function (s) { return s.replace(/^\s+|\s+$/g, ''); })
+      .filter(function (s) { return !!s; })
+      .map(function (line) {
+        var m = line.match(/^([A-Za-z]{1,6}\.\s*(?:&\s*[A-Za-z]{1,6}\.)?)\s*(.*)$/);
+        if (m && m[2]) return { pos: m[1].replace(/\s+/g, ' '), def: m[2] };
+        return { pos: '', def: line };
+      });
+  }
+
+  function makeLink(label, handler) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wp-link';
+    btn.textContent = label;
+    btn.addEventListener('click', handler);
+    return btn;
+  }
+
+  /**
+   * 后端 AI 兜底命中：命中时同时返回 via:'ai' 与 source:'ai'。
+   * 契约里 via 的取值是 direct|lemma|variant|ai，为了不让后续扩展把 AI 命中当成未知来源，
+   * 这里两个字段都认——任一为 'ai' 即按 AI 来源展示，绝不落进「没查到 / 未知来源」分支。
+   */
+  function isAiHit(r) {
+    return !!r && (r.source === 'ai' || r.via === 'ai');
+  }
+
+  function renderLookup() {
+    if (!popupEl || !current) return;
+    var local = current.local;
+    var result = current.result;
+    var meaning = currentMeaning();
+    var enMode = lookupSettings.definitionLanguage === 'en';
+
+    $('wpWord').textContent = current.word;
+    var ph = $('wpPhonetic');
+    var phonetic = currentPhonetic();
+    ph.textContent = phonetic || '';
+    ph.hidden = !phonetic;
+
+    var badge = $('wpBadge');
+    var badgeLabel = '';
+    if (local) badgeLabel = '我的词库';
+    else if (result && result.found) {
+      badgeLabel = isAiHit(result) ? 'AI'
+        : (result.source === 'import' ? '导入词库' : '本地词库');
+    }
+    badge.textContent = badgeLabel;
+    badge.hidden = !badgeLabel;
+
+    var note = $('wpNote');
+    note.textContent = '';
+    note.hidden = true;
+
+    var status = $('wpStatus');
+    status.className = 'wp-status';
+    status.textContent = '';
+    status.hidden = true;
+
+    var senses = $('wpSenses');
+    senses.innerHTML = '';
+    senses.hidden = true;
+
+    if (current.loading) {
+      status.hidden = false;
+      var spin = document.createElement('span');
+      spin.className = 'wp-spinner';
+      status.appendChild(spin);
+      status.appendChild(document.createTextNode('正在查询…'));
+    } else if (current.error) {
+      status.hidden = false;
+      status.className = 'wp-status error';
+      status.appendChild(document.createTextNode('查词失败：' + current.error));
+      status.appendChild(makeLink('重试', function () { requestLookup(false); }));
+    } else if (!local && (!result || !result.found)) {
+      status.hidden = false;
+      status.appendChild(document.createTextNode('没有查到释义'));
+      if (!result || !result.aiTried) {
+        status.appendChild(makeLink('用 AI 补全', function () { requestLookup(true); }));
+      }
+    } else if (enMode && !isAiHit(result)) {
+      // 只有「本地词库给不出英文释义」时才提示转 AI；AI 已经答过就不再提示
+      note.hidden = false;
+      note.textContent = '本地词库无英文释义';
+      note.appendChild(document.createTextNode(' '));
+      note.appendChild(makeLink('用 AI 释义', function () { requestLookup(true); }));
+    }
+
+    if (meaning) {
+      var list = parseSenses(meaning);
+      if (list.length) {
+        senses.hidden = false;
+        list.forEach(function (s) {
+          var row = document.createElement('div');
+          row.className = 'wp-sense';
+          var pos = document.createElement('span');
+          pos.className = 'wp-pos';
+          pos.textContent = s.pos || '';
+          var def = document.createElement('span');
+          def.className = 'wp-def' + (enMode ? ' dim' : '');
+          def.textContent = s.def;
+          row.appendChild(pos);
+          row.appendChild(def);
+          senses.appendChild(row);
+        });
+      }
+    }
+
+    if (!current.loading && !current.error && result && result.found && result.via === 'lemma' &&
+        result.matched && result.matched !== current.word) {
+      status.hidden = false;
+      status.appendChild(document.createTextNode('词形还原：' + current.word + ' → ' + result.matched));
+    }
+
+    $('wpCopy').disabled = !meaning && !current.word;
+    var save = $('wpSave');
+    save.textContent = local ? '移出我的词库' : '加入我的词库';
+    save.disabled = !local && !meaning;
+  }
+
+  function anchorRect() {
+    if (!current) return null;
+    if (current.liveRange) {
+      try {
+        var box = current.liveRange.getBoundingClientRect();
+        if (box && (box.width || box.height)) return box;
+      } catch (e) { /* ignore */ }
+      return null;
+    }
+    return current.rect || null;
+  }
+
+  /** 词上方居中；上方空间不足翻到下方；距视口边缘 12px；避开底部操作坞 */
+  function positionLookup() {
+    if (!popupEl || popupEl.hidden) return;
+    var rect = anchorRect();
+    var w = popupEl.offsetWidth;
+    var h = popupEl.offsetHeight;
+    if (!w || !h) return;
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var M = 12;
+    var cx = rect ? (rect.left + rect.right) / 2 : vw / 2;
+    var left = cx - w / 2;
+    var maxLeft = vw - w - M;
+    left = maxLeft <= M ? M : Math.min(Math.max(left, M), maxLeft);
+    var bottomLimit = vh - M;
+    var dock = $('dock');
+    if (dock && !dock.hidden) {
+      var dockRect = dock.getBoundingClientRect();
+      if (dockRect.top > M) bottomLimit = Math.min(bottomLimit, dockRect.top - 8);
+    }
+    if (bottomLimit - h < M) bottomLimit = vh - M;
+    var top = rect ? rect.top - h - 8 : M;
+    if (top < M) top = rect ? rect.bottom + 8 : M;
+    if (top + h > bottomLimit) top = bottomLimit - h;
+    if (top < M) top = M;
+    popupEl.style.left = Math.round(left) + 'px';
+    popupEl.style.top = Math.round(top) + 'px';
+  }
+
+  function followLookup() {
+    if (!popupEl || popupEl.hidden || !current) return;
+    if (current.stale) { closeLookup(); return; }
+    var rect = anchorRect();
+    if (!rect) { closeLookup(); return; }
+    if (rect.bottom < 0 || rect.top > window.innerHeight) { closeLookup(); return; }
+    positionLookup();
+  }
+
+  function closeLookup() {
+    if (popupEl) popupEl.hidden = true;
+    popupWord = '';
+    current = null;
+    lookupSeq++;
+  }
+
+  function copyText(text) {
+    var fallback = function () {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', 'readonly');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.left = '-1000px';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand('copy');
+        if (ta.parentNode) ta.remove();
+        toast(ok ? '已复制' : '复制失败，请手动选择');
+      } catch (e) { toast('复制失败：' + e.message); }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('已复制'); }, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  function saveToWordbook() {
+    if (!current) return;
+    var key = current.word.toLowerCase();
+    if (wordbook[key]) {
+      delete wordbook[key];
+      saveWordbook();
+      toast('已移出我的词库');
+    } else {
+      var meaning = currentMeaning();
+      if (!meaning) return;
+      wordbook[key] = {
+        word: current.word,
+        phonetic: currentPhonetic(),
+        meaning: meaning,
+        updatedAt: Date.now()
+      };
+      saveWordbook();
+      toast('已加入我的词库');
+    }
+    renderLookup();
+    positionLookup();
+  }
+
+  function bindLookup() {
+    popupEl = $('wordPopup');
+    if (!popupEl) return;
+    editor.addEventListener('click', onEditorClick);
+    document.addEventListener('mousedown', function (e) {
+      if (!popupEl.hidden && !popupEl.contains(e.target) && !lookupHostOf(e.target)) closeLookup();
+    }, true);
+    document.addEventListener('scroll', followLookup, true);
+    window.addEventListener('resize', function () {
+      if (popupEl && !popupEl.hidden) positionLookup();
+    });
+    $('wpClose').addEventListener('click', closeLookup);
+    $('wpCopy').addEventListener('click', function () { copyText(lookupPlainText()); });
+    $('wpSave').addEventListener('click', saveToWordbook);
+    $('wpRetry').addEventListener('click', function () { requestLookup(true); });
+
+    var optEnabled = $('optLookupEnabled');
+    var optLang = $('optDefinitionLang');
+    var optAi = $('optLookupAi');
+    optEnabled.checked = lookupSettings.enabled;
+    optLang.value = lookupSettings.definitionLanguage;
+    optAi.checked = lookupSettings.aiFallback;
+    optEnabled.addEventListener('change', function () {
+      lookupSettings.enabled = optEnabled.checked;
+      saveLookupSettings();
+      if (!lookupSettings.enabled) closeLookup();
+    });
+    optLang.addEventListener('change', function () {
+      lookupSettings.definitionLanguage = optLang.value;
+      saveLookupSettings();
+      if (current && !popupEl.hidden) requestLookup(false);
+    });
+    optAi.addEventListener('change', function () {
+      lookupSettings.aiFallback = optAi.checked;
+      saveLookupSettings();
+    });
+    updateWordbookCount();
+  }
+
+
   // ---------------- 设置 ----------------
 
   function openSettings() {
+    closeLookup();
+    updateWordbookCount();
     $('settingsMask').hidden = false;
     $('infoMode').textContent = state.info ? (state.info.mode || '—') : '—';
     $('infoVersion').textContent = state.info ? state.info.version : '—';
@@ -588,7 +1262,7 @@
       if (e.target === $('settingsMask')) closeSettings();
     });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') { closeSettings(); closeSidebar(); }
+      if (e.key === 'Escape') { closeLookup(); closeSettings(); closeSidebar(); }
     });
     Array.prototype.forEach.call(document.querySelectorAll('#themeCards .theme-card'), function (card) {
       card.addEventListener('click', function () { applyTheme(card.dataset.theme); });
@@ -602,6 +1276,7 @@
         });
       });
     });
+    bindLookup();
     window.addEventListener('beforeunload', function (e) {
       if (state.saving > 0) { e.preventDefault(); e.returnValue = ''; }
     });
@@ -610,6 +1285,8 @@
   // ---------------- 启动 ----------------
 
   initTheme();
+  loadLookupSettings();
+  loadWordbook();
   bind();
 
   api('api/info').then(function (info) {
