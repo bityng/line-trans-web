@@ -119,4 +119,7 @@ WantedBy=multi-user.target
 
 ## 许可
 
-[MIT License](LICENSE)
+**GNU Affero General Public License v3.0（AGPL-3.0-or-later）**，完整条款见 [LICENSE](LICENSE)。
+
+因为本仓库是一个**网络服务**，按 AGPL 第 13 条，对外提供服务时需要让使用者能够获取到源码：
+网页界面「系统设置 → 关于」中已列出两个仓库地址，二次开发时请保留该入口。
