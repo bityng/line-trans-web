@@ -33,7 +33,7 @@ const DICT_DIR = path.join(ROOT, 'dict');
 const DICT_CORE_FILE = path.join(DICT_DIR, 'core.tsv');
 const DICT_LEMMA_FILE = path.join(DICT_DIR, 'lemma.tsv');
 const DICT_IMPORT_FILE = path.join(DICT_DIR, 'dict-import.tsv');
-const VERSION = '1.8.1';
+const VERSION = '1.8.3';
 
 // 文本清洗/切分用到的正则（在数据初始化前就要能用到）
 const TIMECODE = /^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->.*$/;
@@ -606,13 +606,30 @@ function sendJson(res, code, value) {
   res.end(body);
 }
 
+/**
+ * 读取并解析 POST 的 JSON 请求体。
+ *
+ * 收的是**原始 Buffer**，最后一次性按 UTF-8 解码 —— 不能写成 `data += chunk`：
+ * 那样每个 TCP 分块各自解码，一个多字节汉字正好被切在分块边界上就会变成 U+FFFD，
+ * 与安卓端内置网页台的乱码同源（见 项目说明与开发指南.md §10）。
+ * 请求体一律按 UTF-8 解析（JSON 的交换编码）。
+ */
 function readBody(req) {
   return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 8e6) req.destroy(); });
-    req.on('end', () => {
-      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
+    const chunks = [];
+    let size = 0;
+    let aborted = false;
+    req.on('data', (c) => {
+      if (aborted) return;
+      size += c.length;
+      if (size > 8e6) { aborted = true; req.destroy(); return; }
+      chunks.push(c);
     });
+    req.on('end', () => {
+      try { resolve(size ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); }
+      catch { resolve({}); }
+    });
+    req.on('error', () => resolve({}));
   });
 }
 

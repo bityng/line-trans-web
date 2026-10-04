@@ -60,7 +60,9 @@
   function api(path, options) {
     var url = path + (path.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
     options = options || {};
-    options.headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+    // charset 不能省：安卓端内置网页台跑在 NanoHTTPD 上，请求体没声明 charset 时它按 US-ASCII 解码，
+    // 中文会变成**不可逆**的 U+FFFD（网页台打完字 → 回到安卓端全是乱码，见 项目说明与开发指南.md §10）。
+    options.headers = Object.assign({ 'Content-Type': 'application/json; charset=utf-8' }, options.headers || {});
     return fetch(url, options).then(function (res) {
       if (!res.ok) {
         return res.text().then(function (t) { throw new Error(t || ('HTTP ' + res.status)); });
