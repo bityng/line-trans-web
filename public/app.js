@@ -25,7 +25,9 @@
     current: -1,
     windowStart: 0,
     saving: 0,
-    batch: { running: false, stop: false, done: 0, total: 0 }
+    batch: { running: false, stop: false, done: 0, total: 0 },
+    peers: [],
+    remote: null            // 非空 = 正在直接编辑对端文档 { peerId, peerName, docId, name }
   };
 
   var $ = function (id) { return document.getElementById(id); };
@@ -143,6 +145,7 @@
 
   function openDoc(id) {
     api('api/doc?id=' + encodeURIComponent(id)).then(function (doc) {
+      state.remote = null;
       state.doc = doc;
       state.current = -1;
       renderSidebar();
@@ -206,6 +209,7 @@
     $('unitCount').textContent = '显示 ' + state.filtered.length + ' / ' + doc.total;
     state.windowStart = 0;
     renderWindow(true);
+    renderPeerBar();
   }
 
   /** 分窗口渲染：默认 60 句，滚到底部自动加载下一批（长文档不再卡） */
@@ -401,8 +405,11 @@
 
   function saveUnit(index, patch) {
     var body = Object.assign({ docId: state.doc.id, index: index }, patch);
+    var remote = state.remote;
+    if (remote) body.peer = remote.peerId;
     state.saving++;
-    return api('api/unit', { method: 'POST', body: JSON.stringify(body) })
+    // 直接编辑对端时，保存走服务器的代理接口；回包形状与本地一致（ok/total/done）
+    return api(remote ? 'api/remote/unit' : 'api/unit', { method: 'POST', body: JSON.stringify(body) })
       .then(function (res) {
         var before = state.doc.units.find(function (u) { return u.i === index; });
         var wasDone = !!(before && before.done);
@@ -1189,6 +1196,203 @@
   }
 
 
+  // ---------------- 设备（v1.9.0） ----------------
+  //
+  // 界面只跟「本机服务器」说话：发现设备、列对端文件、同步到本地、直接写对端，
+  // 全部由服务器代理（浏览器拿不到 UDP 广播，也不该被迫直连对端）。
+  // 安卓内置网页台用的是同一套界面，所以改这里等于三端同时受益。
+
+  function loadPeers() {
+    return api('api/peers').then(function (res) {
+      state.peers = (res && res.peers) || [];
+      renderPeerList();
+      return state.peers;
+    }).catch(function () { /* 老服务端没有这个接口，静默忽略 */ });
+  }
+
+  function renderPeerList() {
+    var list = $('peerList');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!state.peers.length) {
+      list.innerHTML = '<div class="muted peer-empty">没发现其它设备</div>';
+      return;
+    }
+    state.peers.forEach(function (p) {
+      var el = document.createElement('div');
+      el.className = 'peer-item' + (p.online ? ' online' : '');
+      el.innerHTML = '<span class="pdot"></span><span class="pname"></span><span class="ptag"></span>';
+      el.querySelector('.pname').textContent = p.name;
+      el.querySelector('.ptag').textContent = p.manual ? '远程' : (p.platform || '设备');
+      el.title = (p.url || '') + (p.manual ? '（手填的远程服务器）' : '（局域网发现的设备）');
+      el.addEventListener('click', function () { closeSidebar(); openPeer(p); });
+      list.appendChild(el);
+    });
+  }
+
+  function openPeer(p) {
+    $('peerTitle').textContent = p.name;
+    $('peerMask').hidden = false;
+    var box = $('peerDocs');
+    box.innerHTML = '<div class="muted peer-empty">正在读取文件列表…</div>';
+    api('api/remote/docs?peer=' + encodeURIComponent(p.id)).then(function (res) {
+      box.innerHTML = '';
+      if (!res || res.ok === false) {
+        box.innerHTML = '<div class="peer-hint">连不上：' + esc((res && res.error) || '未知错误') + '</div>';
+        return;
+      }
+      var docs = res.docs || [];
+      if (!docs.length) {
+        box.innerHTML = '<div class="peer-hint">这台设备还没有文档</div>';
+        return;
+      }
+      docs.forEach(function (d) { box.appendChild(renderPeerDoc(p, d)); });
+      var hint = document.createElement('div');
+      hint.className = 'peer-hint';
+      hint.textContent = '「同步到本地」= 复制一份到本机，对端不变；「直接编辑」= 改的就是对端那份。';
+      box.appendChild(hint);
+    });
+  }
+
+  function renderPeerDoc(p, d) {
+    var row = document.createElement('div');
+    row.className = 'peer-doc';
+    row.innerHTML = '<span class="dname"></span><span class="dmeta"></span><span class="dacts"></span>';
+    row.querySelector('.dname').textContent = d.name;
+    row.querySelector('.dmeta').textContent = (d.unitMode === 'SENTENCE' ? '逐句' : '逐行') +
+      ' · ' + d.done + '/' + d.total;
+    var acts = row.querySelector('.dacts');
+
+    var pull = document.createElement('button');
+    pull.className = 'btn ghost sm';
+    pull.textContent = '同步到本地';
+    pull.addEventListener('click', function () { pullPeerDoc(p, d, pull); });
+
+    var edit = document.createElement('button');
+    edit.className = 'btn sm';
+    edit.textContent = '直接编辑';
+    edit.addEventListener('click', function () { openRemoteDoc(p, d.id); });
+
+    acts.appendChild(pull);
+    acts.appendChild(edit);
+    return row;
+  }
+
+  function pullPeerDoc(p, d, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
+    api('api/remote/pull', { method: 'POST', body: JSON.stringify({ peer: p.id, docId: d.id }) })
+      .then(function (res) {
+        if (!res || res.ok === false) throw new Error((res && res.error) || '同步失败');
+        toast('已同步到本地：' + res.name);
+        return api('api/docs');
+      })
+      .then(function (res) {
+        if (res && res.docs) state.docs = res.docs;
+        renderSidebar();
+      })
+      .catch(function (e) { toast('同步失败：' + e.message); })
+      .finally(function () {
+        if (btn) { btn.disabled = false; btn.textContent = '同步到本地'; }
+      });
+  }
+
+  /** 直接编辑对端文档：读回来用同一套编辑器渲染，保存走 /api/remote/unit。 */
+  function openRemoteDoc(p, docId) {
+    api('api/remote/doc?peer=' + encodeURIComponent(p.id) + '&id=' + encodeURIComponent(docId))
+      .then(function (doc) {
+        if (!doc || doc.error) throw new Error((doc && doc.error) || '读取失败');
+        state.remote = { peerId: p.id, peerName: p.name, docId: doc.id, name: doc.name };
+        state.doc = doc;
+        state.current = -1;
+        $('peerMask').hidden = true;
+        renderSidebar();
+        renderDoc();
+        $('scrollArea').scrollTop = 0;
+        toast('正在直接编辑「' + p.name + '」上的文档');
+      })
+      .catch(function (e) { toast('打开失败：' + e.message); });
+  }
+
+  function exitRemote() {
+    state.remote = null;
+    state.doc = null;
+    renderPeerBar();
+    api('api/docs').then(function (res) {
+      state.docs = (res && res.docs) || [];
+      renderSidebar();
+      if (state.docs.length) {
+        openDoc(state.docs[0].id);
+      } else {
+        $('emptyState').hidden = false;
+        $('subbar').hidden = true;
+        $('dock').hidden = true;
+      }
+    }).catch(function (e) { toast('回到本机失败：' + e.message); });
+  }
+
+  function renderPeerBar() {
+    var bar = $('remoteBar');
+    if (!bar) return;
+    var on = !!state.remote;
+    bar.hidden = !on;
+    if (on) {
+      $('remoteBarText').textContent = '正在直接编辑「' + state.remote.peerName + '」的：' +
+        (state.remote.name || '未命名文档');
+    }
+    // 远程文档不支持切换切分方式 / 导出 / 批量 AI（这些接口没有代理）
+    $('btnMode').disabled = on;
+    $('btnExport').disabled = on;
+    $('btnBatch').disabled = on;
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  /** 添加远程服务器：填地址（可选令牌/名字），先探通再入册。 */
+  function openPeerAdd() {
+    $('peerTitle').textContent = '添加远程服务器';
+    var box = $('peerDocs');
+    box.innerHTML = '';
+    var form = document.createElement('div');
+    form.className = 'peer-add-form';
+    form.innerHTML =
+      '<div class="peer-hint">填一台跑着 LineTrans 服务端的地址：局域网里的手机 / 电脑，或者公网服务器。</div>' +
+      '<input id="peerUrl" placeholder="http://192.168.1.10:8787">' +
+      '<input id="peerToken" placeholder="访问令牌（对端设了 token 才需要）">' +
+      '<input id="peerName" placeholder="显示名（可留空，默认用对端自己的名字）">' +
+      '<button class="btn" id="btnPeerSave" type="button">连接并保存</button>' +
+      '<div class="peer-hint" id="peerAddHint"></div>';
+    box.appendChild(form);
+    $('peerMask').hidden = false;
+
+    $('btnPeerSave').addEventListener('click', function () {
+      var url = $('peerUrl').value.trim();
+      if (!url) { toast('先填地址'); return; }
+      $('peerAddHint').textContent = '正在连接…';
+      api('api/peers', {
+        method: 'POST',
+        body: JSON.stringify({
+          url: url,
+          token: $('peerToken').value.trim(),
+          name: $('peerName').value.trim()
+        })
+      }).then(function (res) {
+        if (!res || res.ok === false) throw new Error((res && res.error) || '连接失败');
+        toast('已连接：' + res.peer.name);
+        return loadPeers();
+      }).then(function () {
+        $('peerMask').hidden = true;
+      }).catch(function (e) {
+        $('peerAddHint').textContent = '失败：' + e.message;
+      });
+    });
+
+    setTimeout(function () { try { $('peerUrl').focus(); } catch (e) { /* ignore */ } }, 30);
+  }
+
   // ---------------- 设置 ----------------
 
   function openSettings() {
@@ -1278,6 +1482,12 @@
         });
       });
     });
+    // 设备（v1.9.0）
+    $('btnAddPeer').addEventListener('click', openPeerAdd);
+    $('btnClosePeer').addEventListener('click', function () { $('peerMask').hidden = true; });
+    $('peerMask').addEventListener('click', function (e) { if (e.target === $('peerMask')) $('peerMask').hidden = true; });
+    $('btnRemoteExit').addEventListener('click', exitRemote);
+
     bindLookup();
     window.addEventListener('beforeunload', function (e) {
       if (state.saving > 0) { e.preventDefault(); e.returnValue = ''; }
@@ -1301,6 +1511,9 @@
     state.docs = res.docs || [];
     renderSidebar();
     if (state.docs.length) openDoc(state.docs[0].id);
+    // 设备发现：先是立刻一次，之后每 10 秒刷新（服务器那边每 3 秒广播一次）
+    loadPeers();
+    setInterval(loadPeers, 10000);
   }).catch(function (e) {
     setConn('连接失败', false);
     toast('无法连接服务：' + e.message + '（若手机端设置了访问令牌，请在网址后加 ?token=你的令牌）');

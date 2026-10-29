@@ -21,6 +21,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import dgram from 'node:dgram';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 
@@ -56,6 +57,9 @@ function loadConfig() {
     host: process.env.LT_HOST || cfg.host || '0.0.0.0',
     port: Number(process.env.LT_PORT || cfg.port || 8787),
     token: process.env.LT_TOKEN || cfg.token || '',
+    // 设备互通（v1.9.0）：本机在局域网里的显示名（留空用主机名）+ UDP 发现端口
+    deviceName: cfg.deviceName || '',
+    discoveryPort: Number(process.env.LT_DISCOVERY_PORT || cfg.discoveryPort || 41234),
     targetLang: cfg.targetLang || 'zh-CN',
     sourceLang: cfg.sourceLang || 'auto',
     detectLanguage: cfg.detectLanguage !== false,
@@ -598,6 +602,181 @@ async function aiLookup(word, lang) {
   return { text, cost: costOf(result.promptTokens, result.completionTokens) };
 }
 
+// ---------------- 设备互通（v1.9.0） ----------------
+//
+// 三端（安卓 / 网页服务端 / PC）在同一个局域网里互相看得见：列出对端的译文文件、
+// 把对端文件「同步到本地」、或直接改对端文件。
+//
+// 设计要点（为什么不去新造一套协议）：
+//   · 文档读写接口三端早就有了（/api/docs、/api/doc、/api/unit），这里只补一个身份接口 /api/peer；
+//   · 跨端一律由**本机服务器代理**（/api/remote/*）：浏览器不用直连对端，绕开 CORS，
+//     安卓内置网页台也能直接复用同一套前端；
+//   · 发现走 UDP 广播（浏览器拿不到 UDP），由服务器收集成 /api/peers 给界面用。
+
+const PEER_API = 1;
+const PEER_FILE = path.join(DATA_DIR, 'peer.json');
+
+/** 本机身份：首次启动生成一个稳定 id；名字取 deviceName，没配就用主机名。 */
+function loadPeerIdentity() {
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(PEER_FILE, 'utf8')); } catch { saved = null; }
+  const id = saved && typeof saved.id === 'string' && saved.id ? saved.id : crypto.randomUUID();
+  const name = String(config.deviceName || (saved && saved.name) || os.hostname() || 'LineTrans').slice(0, 40);
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(PEER_FILE, JSON.stringify({ id: id, name: name }, null, 2), 'utf8');
+  } catch { /* 只读目录也能跑，只是重启后 id 会变 */ }
+  return { id: id, name: name, platform: 'web', version: VERSION, api: PEER_API, port: config.port };
+}
+
+const peerSelf = loadPeerIdentity();
+
+/** 局域网里发现到的设备；manual 的是用户手填的远程服务器。 */
+const peerStore = {
+  discovered: new Map(),
+  manual: new Map(),
+};
+
+function peerUrlOf(p) {
+  if (!p) return '';
+  if (p.url) return String(p.url).replace(/\/+$/, '');
+  return 'http://' + p.host + ':' + p.port;
+}
+
+/** 界面要的设备列表：手填的在前，自己不算。 */
+function peerList() {
+  const out = [];
+  const seen = new Set();
+  for (const p of peerStore.manual.values()) {
+    const online = !!p.lastSeen && Date.now() - p.lastSeen < 30000;
+    out.push({ id: p.id, name: p.name || p.url, platform: p.platform || 'remote', version: p.version || '',
+      url: peerUrlOf(p), hasToken: !!p.token, manual: true, lastSeen: p.lastSeen || 0, online: online });
+    seen.add(p.id);
+  }
+  for (const p of peerStore.discovered.values()) {
+    if (p.id === peerSelf.id || seen.has(p.id)) continue;
+    out.push({ id: p.id, name: p.name, platform: p.platform, version: p.version, url: peerUrlOf(p),
+      hasToken: false, manual: false, lastSeen: p.lastSeen, online: Date.now() - p.lastSeen < 20000 });
+  }
+  return out;
+}
+
+/** 代理一次对端请求：带超时，出错抛可读错误，不把本机服务拖死。 */
+async function peerFetch(peer, apiPath, options) {
+  options = options || {};
+  const base = peerUrlOf(peer);
+  if (!base) throw new Error('对端地址为空');
+  let url = base + apiPath;
+  if (peer.token) url += (apiPath.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(peer.token);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), options.timeoutMs || 4000);
+  try {
+    const res = await fetch(url, {
+      method: options.method || 'GET',
+      headers: options.body ? { 'content-type': 'application/json; charset=utf-8' } : undefined,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: ctrl.signal,
+    });
+    const text = await res.text();
+    let body = {};
+    try { body = text ? JSON.parse(text) : {}; } catch { body = { error: text.slice(0, 120) }; }
+    if (!res.ok) throw new Error('对端返回 ' + res.status + '：' + (body.error || text.slice(0, 120)));
+    return body;
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('对端超时：' + base);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function findPeer(id) {
+  return peerStore.manual.get(id) || peerStore.discovered.get(id) || null;
+}
+
+/** 同步到本地：把对端文档整篇复制成一篇本地文档，对端不受影响。 */
+function importRemoteDoc(remoteDoc, peerName) {
+  const units = Array.isArray(remoteDoc.units) ? remoteDoc.units : [];
+  const doc = {
+    id: crypto.randomUUID(),
+    name: (remoteDoc.name || '未命名文档') + '（来自' + (peerName || '其它设备') + '）',
+    folder: '同步',
+    unitMode: remoteDoc.unitMode === 'SENTENCE' ? 'SENTENCE' : 'LINE',
+    sourceText: units.map((u) => u.source || '').join('\n'),
+    pinned: false,
+    lastIndex: 0,
+    updatedAt: Date.now(),
+    units: units.map((u) => ({ source: u.source || '', translation: u.translation || '', done: !!u.done, starred: !!u.starred })),
+  };
+  state.docs.push(doc);
+  saveState();
+  return doc;
+}
+
+/** 手填的远程服务器：跟着 state.json 一起存，重启/备份都能带回来。 */
+function restoreManualPeers() {
+  const list = Array.isArray(state.manualPeers) ? state.manualPeers : [];
+  for (const p of list) {
+    if (!p || !p.url) continue;
+    peerStore.manual.set(p.id || p.url, {
+      id: p.id || p.url, name: p.name || p.url, url: p.url, token: p.token || '',
+      platform: p.platform || 'remote', version: p.version || '', lastSeen: 0, manual: true,
+    });
+  }
+}
+
+function persistManualPeers() {
+  state.manualPeers = [...peerStore.manual.values()].map((p) => ({ id: p.id, name: p.name, url: p.url, token: p.token || '' }));
+  saveState();
+}
+
+/** UDP 广播发现：每 3 秒喊一次；20 秒没听到就当掉线（手填的保留）。 */
+let discoverySocket = null;
+function startDiscovery() {
+  if (process.env.LT_DISCOVERY === '0') return;
+  try {
+    const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    discoverySocket = sock;
+    sock.on('error', (e) => { console.error('[发现] UDP 异常：' + e.message); try { sock.close(); } catch { /* ignore */ } });
+    sock.on('message', (buf, rinfo) => {
+      let msg = null;
+      try { msg = JSON.parse(buf.toString('utf8')); } catch { return; }
+      if (!msg || msg.lt !== 'peer' || !msg.id || msg.id === peerSelf.id) return;
+      const port = Number(msg.port) || 0;
+      if (!port) return;
+      peerStore.discovered.set(String(msg.id), {
+        id: String(msg.id),
+        name: String(msg.name || '另一台设备').slice(0, 40),
+        platform: String(msg.platform || 'device'),
+        version: String(msg.version || ''),
+        host: rinfo.address,
+        port: port,
+        lastSeen: Date.now(),
+      });
+    });
+    sock.bind(config.discoveryPort, () => {
+      try { sock.setBroadcast(true); } catch { /* 某些环境不允许广播 */ }
+      const beat = () => {
+        const payload = Buffer.from(JSON.stringify({
+          lt: 'peer', v: PEER_API, id: peerSelf.id, name: peerSelf.name,
+          platform: 'web', version: VERSION, port: config.port,
+        }), 'utf8');
+        try { sock.send(payload, 0, payload.length, config.discoveryPort, '255.255.255.255'); } catch { /* ignore */ }
+        const now = Date.now();
+        for (const [id, p] of peerStore.discovered) {
+          if (now - p.lastSeen > 20000) peerStore.discovered.delete(id);
+        }
+      };
+      beat();
+      const timer = setInterval(beat, 3000);
+      if (timer.unref) timer.unref();
+      console.log('  设备：  ' + peerSelf.name + '（UDP ' + config.discoveryPort + ' 广播已开）');
+    });
+  } catch (e) {
+    console.error('[发现] 启动失败（不影响本地功能）：' + e.message);
+  }
+}
+
 // ---------------- HTTP ----------------
 
 function sendJson(res, code, value) {
@@ -826,10 +1005,138 @@ async function handleApi(req, res, url, payload) {
       return sendJson(res, 200, body);
     }
 
+    // ---------- 设备互通 ----------
+
+    case '/api/peer': {
+      if (req.method === 'POST') {
+        const name = typeof payload.name === 'string' ? payload.name.trim().slice(0, 40) : '';
+        if (name) {
+          peerSelf.name = name;
+          try { fs.writeFileSync(PEER_FILE, JSON.stringify({ id: peerSelf.id, name: name }, null, 2), 'utf8'); } catch { /* ignore */ }
+        }
+      }
+      return sendJson(res, 200, { ok: true, peer: peerSelf });
+    }
+
+    case '/api/peers': {
+      if (req.method === 'POST') {
+        const raw = typeof payload.url === 'string' ? payload.url.trim() : '';
+        if (!raw) return sendJson(res, 400, { error: '缺少 url' });
+        const url = (/^https?:\/\//i.test(raw) ? raw : 'http://' + raw).replace(/\/+$/, '');
+        const token = typeof payload.token === 'string' ? payload.token.trim() : '';
+        const wanted = typeof payload.name === 'string' ? payload.name.trim() : '';
+        let remote = {};
+        try {
+          const info = await peerFetch({ url: url, token: token }, '/api/peer');
+          remote = info.peer || {};
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, error: '连不上：' + e.message });
+        }
+        const id = remote.id || url;
+        const name = wanted || remote.name || url;
+        peerStore.manual.set(id, { id: id, name: name, url: url, token: token, platform: remote.platform || 'remote', version: remote.version || '', lastSeen: Date.now(), manual: true });
+        persistManualPeers();
+        return sendJson(res, 200, { ok: true, peer: { id: id, name: name, url: url }, peers: peerList() });
+      }
+      if (req.method === 'DELETE') {
+        const id = p.get('id') || '';
+        if (!peerStore.manual.has(id)) return sendJson(res, 404, { error: '没有这个远程服务器' });
+        peerStore.manual.delete(id);
+        persistManualPeers();
+        return sendJson(res, 200, { ok: true, peers: peerList() });
+      }
+      return sendJson(res, 200, { ok: true, self: peerSelf, peers: peerList(), discovery: !!discoverySocket });
+    }
+
+    /** 列出对端文档（代理）。 */
+    case '/api/remote/docs': {
+      const peer = findPeer(p.get('peer') || '');
+      if (!peer) return sendJson(res, 404, { error: '设备不存在' });
+      try {
+        const body = await peerFetch(peer, '/api/docs', { timeoutMs: 5000 });
+        peer.lastSeen = Date.now();
+        return sendJson(res, 200, { ok: true, peer: { id: peer.id, name: peer.name }, docs: Array.isArray(body.docs) ? body.docs : [] });
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: e.message });
+      }
+    }
+
+    /** 读对端一篇文档（代理）—— 用于「直接编辑」。 */
+    case '/api/remote/doc': {
+      const peer = findPeer(p.get('peer') || '');
+      if (!peer) return sendJson(res, 404, { error: '设备不存在' });
+      const id = p.get('id') || '';
+      if (!id) return sendJson(res, 400, { error: '缺少 id' });
+      try {
+        const body = await peerFetch(peer, '/api/doc?id=' + encodeURIComponent(id), { timeoutMs: 6000 });
+        peer.lastSeen = Date.now();
+        return sendJson(res, 200, body);
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: e.message });
+      }
+    }
+
+    /** 写对端一句译文（代理）—— 「直接修改其它端文件」。 */
+    case '/api/remote/unit': {
+      const peer = findPeer(payload.peer || '');
+      if (!peer) return sendJson(res, 404, { error: '设备不存在' });
+      try {
+        const body = await peerFetch(peer, '/api/unit', {
+          method: 'POST',
+          timeoutMs: 6000,
+          body: { docId: payload.docId, index: payload.index, translation: payload.translation, source: payload.source, done: payload.done, starred: payload.starred },
+        });
+        peer.lastSeen = Date.now();
+        return sendJson(res, 200, body);
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: e.message });
+      }
+    }
+
+    /** 同步到本地：把对端文档整篇复制成本地一篇新文档。 */
+    case '/api/remote/pull': {
+      const peer = findPeer(payload.peer || '');
+      if (!peer) return sendJson(res, 404, { error: '设备不存在' });
+      const docId = payload.docId || '';
+      if (!docId) return sendJson(res, 400, { error: '缺少 docId' });
+      try {
+        const remote = await peerFetch(peer, '/api/doc?id=' + encodeURIComponent(docId), { timeoutMs: 8000 });
+        const doc = importRemoteDoc(remote, peer.name);
+        peer.lastSeen = Date.now();
+        return sendJson(res, 200, { ok: true, id: doc.id, name: doc.name, total: doc.units.length, done: doc.units.filter(isDone).length });
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: e.message });
+      }
+    }
+
+    /** 新建文档（导入统一入口；同步到本地也用它）。 */
+    case '/api/import': {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: '只支持 POST' });
+      const units = Array.isArray(payload.units) ? payload.units : null;
+      if (!units) return sendJson(res, 400, { error: '缺少 units' });
+      const doc = {
+        id: crypto.randomUUID(),
+        name: payload.name || '同步文档',
+        folder: payload.folder || '同步',
+        unitMode: payload.unitMode === 'SENTENCE' ? 'SENTENCE' : 'LINE',
+        sourceText: units.map((u) => u.source || '').join('\n'),
+        pinned: false,
+        lastIndex: 0,
+        updatedAt: Date.now(),
+        units: units.map((u) => ({ source: u.source || '', translation: u.translation || '', done: !!u.done, starred: !!u.starred })),
+      };
+      state.docs.push(doc);
+      saveState();
+      return sendJson(res, 200, { ok: true, id: doc.id, total: doc.units.length });
+    }
+
     default:
       return sendJson(res, 404, { error: 'unknown api' });
   }
 }
+
+// 手填的远程服务器：state 已就绪，这里恢复一次
+restoreManualPeers();
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
@@ -862,6 +1169,8 @@ server.listen(config.port, config.host, () => {
   nets.forEach((n) => console.log('  局域网：http://' + n.address + ':' + config.port + '/'));
   console.log('  数据：  ' + STATE_FILE);
   console.log('  模型：  ' + (config.provider?.model || '未配置（编辑 config.json 后可启用 AI 翻译）'));
+  // 设备发现：绑定失败只影响互访，不影响本机翻译
+  startDiscovery();
   if (!fs.existsSync(path.join(ROOT, 'config.json'))) {
     console.log('  提示：  复制 config.example.json 为 config.json 并填入 API Key 即可使用 AI 翻译');
   }

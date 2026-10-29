@@ -33,6 +33,16 @@
       <input id="docSearch" type="search" placeholder="搜索文档" autocomplete="off">
     </div>
     <div id="docList" class="doc-list"></div>
+
+    <!-- 设备：同一局域网里的其它端（安卓 / 网页服务端 / PC）+ 手填的远程服务器 -->
+    <div class="peer-block">
+      <div class="peer-head">
+        <span>设备</span>
+        <button class="icon-btn peer-add" id="btnAddPeer" title="添加远程服务器" aria-label="添加远程服务器">＋</button>
+      </div>
+      <div id="peerList" class="peer-list"><div class="muted peer-empty">正在查找…</div></div>
+    </div>
+
     <div class="sidebar-foot">
       <span id="connState" class="pill">连接中…</span>
     </div>
@@ -64,6 +74,14 @@
         <button id="btnExport" class="btn ghost sm" disabled>导出</button>
       </div>
     </header>
+
+    <div class="remote-bar" id="remoteBar" hidden>
+      <span class="pill on">远程</span>
+      <span id="remoteBarText">正在编辑其它设备上的文档</span>
+      <span class="grow"></span>
+      <button class="btn ghost sm" id="btnRemotePull" hidden>同步到本地</button>
+      <button class="btn ghost sm" id="btnRemoteExit">回到本机</button>
+    </div>
 
     <div class="subbar" id="subbar" hidden>
       <button class="chip active" data-filter="all">全部</button>
@@ -177,6 +195,19 @@
           <div class="kv"><span>源码</span><span>见上方两个仓库（AGPL 第 13 条要求）</span></div>
         </section>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- 设备：对端文件列表 / 添加远程服务器 -->
+<div class="mask" id="peerMask" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3 id="peerTitle">设备</h3>
+      <button class="icon-btn" id="btnClosePeer" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="peer-docs" id="peerDocs"></div>
     </div>
   </div>
 </div>

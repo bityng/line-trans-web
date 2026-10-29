@@ -419,3 +419,64 @@ textarea.source-edit {
   .row-tools { flex-direction: row; }
   .word-popup { width: auto; left: 12px !important; right: 12px; max-width: none; }
 }
+
+/* ---------------- 设备（v1.9.0） ---------------- */
+
+.peer-block {
+  margin-top: 6px;
+  border-top: 1px solid var(--border-l2);
+  padding: 10px 10px 4px;
+}
+.peer-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 6px 6px;
+  font-size: 12px; color: var(--text-caption);
+}
+.peer-head .peer-add {
+  margin-left: auto; width: 22px; height: 22px; font-size: 14px; line-height: 1;
+}
+.peer-list { display: flex; flex-direction: column; gap: 2px; }
+.peer-empty { padding: 6px; font-size: 12px; }
+.peer-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 8px; border-radius: var(--radius-s); cursor: pointer;
+  font-size: 13px;
+}
+.peer-item:hover { background: var(--bg-hover); }
+.peer-item .pdot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-caption); flex: none; }
+.peer-item.online .pdot { background: #22c55e; }
+.peer-item .pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peer-item .ptag { font-size: 11px; color: var(--text-caption); flex: none; }
+
+.remote-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 18px; font-size: 13px;
+  background: color-mix(in srgb, var(--brand) 8%, transparent);
+  border-bottom: 1px solid var(--border-l2);
+}
+.remote-bar .grow { flex: 1; }
+
+.peer-docs { display: flex; flex-direction: column; gap: 8px; min-width: 360px; }
+.peer-doc {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--border-l2); border-radius: var(--radius-m);
+}
+.peer-doc .dname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peer-doc .dmeta { font-size: 12px; color: var(--text-caption); flex: none; }
+.peer-doc .dacts { display: flex; gap: 6px; flex: none; }
+.peer-hint { font-size: 12px; color: var(--text-caption); padding: 4px 2px 8px; }
+
+.peer-add-form {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 10px; padding-top: 12px; border-top: 1px solid var(--border-l2);
+}
+.peer-add-form input {
+  width: 100%; padding: 8px 10px; font-size: 13px;
+  border: 1px solid var(--border-l2); border-radius: var(--radius-s);
+  background: var(--bg-elevated); color: inherit;
+}
+
+@media (max-width: 860px) {
+  .peer-docs { min-width: 0; }
+  .peer-doc { flex-wrap: wrap; }
+}
