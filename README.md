@@ -4,6 +4,17 @@
 
 ## 最近更新
 
+### v1.9.0
+
+- **三端设备互通**：本服务端既是「一台设备」，也是「客户端」。
+  - 身份 `GET /api/peer`；UDP 41234 广播，同一局域网三端自动互发现；`GET /api/peers` 汇总（含手填的远程服务器）
+  - 跨端代理 `/api/remote/docs|doc|unit|pull`：浏览器只跟本机服务端说话，绕开 CORS
+  - 「同步到本地」= `/api/remote/pull` 整篇复制成本地文档（文件夹「同步」）；「直接编辑」= 读 `/api/remote/doc` 后保存走 `/api/remote/unit`
+  - `POST /api/peers` 手填远程服务器（地址 + 令牌，探活后入册）、`DELETE /api/peers?id=` 移除，随 `state.json` 持久化
+  - 通用建文档入口 `POST /api/import`
+- 网页台：侧栏「设备」列表 + 对端文件弹窗 + 远程模式提示条
+- 与安卓内置网页台同步（`app/src/main/assets/web/` 与本仓库 `public/` 逐字节一致）
+
 ### v1.8.3
 
 - **修复：POST 请求体一律按 UTF-8 解码**。此前 `readBody()` 用 `data += chunk` 累加，每个 TCP 分块各自解码，
