@@ -10,7 +10,11 @@
 (function () {
   'use strict';
 
-  var TOKEN = new URLSearchParams(location.search).get('token') || '';
+  var QS = new URLSearchParams(location.search);
+  var TOKEN = QS.get('token') || '';
+  // 深链：安卓原生「设备」页点「直接编辑」会带 ?peer=<设备id>&doc=<文档id> 过来
+  var DEEP_PEER = QS.get('peer') || '';
+  var DEEP_DOC = QS.get('doc') || '';
   var THEME_KEY = 'lt-theme';
   var WINDOW_SIZE = 60;
 
@@ -1510,9 +1514,14 @@
   }).then(function (res) {
     state.docs = res.docs || [];
     renderSidebar();
-    if (state.docs.length) openDoc(state.docs[0].id);
+    if (state.docs.length && !(DEEP_PEER && DEEP_DOC)) openDoc(state.docs[0].id);
     // 设备发现：先是立刻一次，之后每 10 秒刷新（服务器那边每 3 秒广播一次）
-    loadPeers();
+    loadPeers().then(function (list) {
+      if (!DEEP_PEER || !DEEP_DOC) return;
+      var target = (list || []).filter(function (p) { return p.id === DEEP_PEER; })[0];
+      if (target) openRemoteDoc(target, DEEP_DOC);
+      else toast('找不到设备：' + DEEP_PEER);
+    });
     setInterval(loadPeers, 10000);
   }).catch(function (e) {
     setConn('连接失败', false);
