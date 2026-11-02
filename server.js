@@ -34,7 +34,7 @@ const DICT_DIR = path.join(ROOT, 'dict');
 const DICT_CORE_FILE = path.join(DICT_DIR, 'core.tsv');
 const DICT_LEMMA_FILE = path.join(DICT_DIR, 'lemma.tsv');
 const DICT_IMPORT_FILE = path.join(DICT_DIR, 'dict-import.tsv');
-const VERSION = '1.9.2';
+const VERSION = '1.9.3';
 
 // 文本清洗/切分用到的正则（在数据初始化前就要能用到）
 const TIMECODE = /^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->.*$/;
@@ -1291,7 +1291,9 @@ restoreManualPeers();
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
 
-  if (config.token && url.searchParams.get('token') !== config.token) {
+  // 令牌只保护 /api/*（数据）。静态页面 / app.js / style.css 必须放行，
+  // 否则浏览器打开 ?token=xxx 时页面本体能进、子资源全 401，界面一片空白。
+  if (url.pathname.startsWith('/api/') && config.token && url.searchParams.get('token') !== config.token) {
     return sendJson(res, 401, { error: '未授权：请在网址后加 ?token=你的令牌' });
   }
 
