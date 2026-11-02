@@ -34,7 +34,7 @@ const DICT_DIR = path.join(ROOT, 'dict');
 const DICT_CORE_FILE = path.join(DICT_DIR, 'core.tsv');
 const DICT_LEMMA_FILE = path.join(DICT_DIR, 'lemma.tsv');
 const DICT_IMPORT_FILE = path.join(DICT_DIR, 'dict-import.tsv');
-const VERSION = '1.9.3';
+const VERSION = '1.9.4';
 
 // 文本清洗/切分用到的正则（在数据初始化前就要能用到）
 const TIMECODE = /^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->.*$/;
@@ -765,7 +765,9 @@ async function peerFetch(peer, apiPath, options) {
   options = options || {};
   const base = peerUrlOf(peer);
   if (!base) throw new Error('对端地址为空');
-  let url = base + apiPath;
+  // 统一成「base 去尾斜杠 + / + path 去首斜杠」：手填地址可能带结尾斜杠，
+  // 直接相加会拼出 http://host:8787api/docs（安卓端就栽在这上面，见 v1.9.5）。
+  let url = base.replace(/\/+$/, '') + '/' + String(apiPath || '').replace(/^\/+/, '');
   if (peer.token) url += (apiPath.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(peer.token);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), options.timeoutMs || 4000);
