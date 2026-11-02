@@ -34,7 +34,7 @@ const DICT_DIR = path.join(ROOT, 'dict');
 const DICT_CORE_FILE = path.join(DICT_DIR, 'core.tsv');
 const DICT_LEMMA_FILE = path.join(DICT_DIR, 'lemma.tsv');
 const DICT_IMPORT_FILE = path.join(DICT_DIR, 'dict-import.tsv');
-const VERSION = '1.9.1';
+const VERSION = '1.9.2';
 
 // 文本清洗/切分用到的正则（在数据初始化前就要能用到）
 const TIMECODE = /^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->.*$/;
@@ -399,16 +399,115 @@ function findDoc(id) {
   return state.docs.find((d) => d.id === id);
 }
 
+/**
+ * 给一组单元在原文里算出行区间 [start, end)。
+ * 顺序扫一遍 sourceText 找每个单元自己的原文；找不到就退回全串搜索，再找不到就记 null。
+ */
+function unitSpans(text, sources) {
+  const spans = new Array(sources.length).fill(null);
+  let cursor = 0;
+  for (let i = 0; i < sources.length; i++) {
+    const src = sources[i];
+    if (!src) continue;
+    let at = text.indexOf(src, cursor);
+    if (at < 0) at = text.indexOf(src);
+    if (at < 0) continue;
+    spans[i] = [at, at + src.length];
+    if (at + src.length > cursor) cursor = at + src.length;
+  }
+  return spans;
+}
+
+/**
+ * 切换逐行 / 逐句时把老译文搬到新单元上（v1.9.2 起）。
+ *
+ * 以前只做「原文完全相同」的对齐，而切分方式一变原文就变了 —— 于是切换一次译文全丢。
+ * 现在按**字符区间**对齐，三种情况都能保住内容：
+ *   1. 原文一样          → 直接搬（老行为）
+ *   2. 一个老单元拆成多个（逐行→逐句）→ 老译文按 \n 拆开分别给；拆不出份数就先给第一句，
+ *      其余留空，但绝不会凭空多出重复译文
+ *   3. 多个老单元合成一个（逐句→逐行）→ 用 \n 把译文接起来，切回去还能原样拆开
+ */
+function realignUnits(sourceText, previous, newSources) {
+  const oldSpans = unitSpans(sourceText, previous.map((u) => u.source || ''));
+  const newSpans = unitSpans(sourceText, newSources);
+
+  const exact = new Map();
+  for (const u of previous) exact.set(u.source || '', u);
+
+  // 每个新单元落在哪个老单元里（拆分场景），以及它是这一组的第几个
+  const holder = new Array(newSpans.length).fill(-1);
+  for (let i = 0; i < newSpans.length; i++) {
+    const ns = newSpans[i];
+    if (!ns) continue;
+    for (let j = 0; j < oldSpans.length; j++) {
+      const os = oldSpans[j];
+      if (!os) continue;
+      if (os[0] <= ns[0] && ns[1] <= os[1]) { holder[i] = j; break; }
+    }
+  }
+  const groupIndex = new Array(newSpans.length).fill(0);
+  const groupSize = new Map();
+  const counter = new Map();
+  for (let i = 0; i < holder.length; i++) {
+    const j = holder[i];
+    if (j < 0) continue;
+    const n = counter.get(j) || 0;
+    groupIndex[i] = n;
+    counter.set(j, n + 1);
+    groupSize.set(j, n + 1);
+  }
+
+  return newSources.map((src, i) => {
+    const prev = exact.get(src);
+    if (prev) {
+      return { source: src, translation: prev.translation || '', done: !!prev.done, starred: !!prev.starred };
+    }
+    const ns = newSpans[i];
+    if (!ns) return { source: src, translation: '', done: false, starred: false };
+
+    const j = holder[i];
+    if (j >= 0) {
+      const oldUnit = previous[j] || {};
+      const text = oldUnit.translation || '';
+      const starred = !!oldUnit.starred;
+      if (!text) return { source: src, translation: '', done: false, starred: starred };
+      const parts = text.split('\n');
+      const size = groupSize.get(j) || 1;
+      if (parts.length === size) {
+        const piece = parts[groupIndex[i]] || '';
+        return { source: src, translation: piece, done: !!piece.trim() || !!oldUnit.done, starred: starred };
+      }
+      if (groupIndex[i] === 0) {
+        return { source: src, translation: text, done: true, starred: starred };
+      }
+      return { source: src, translation: '', done: false, starred: starred };
+    }
+
+    // 合并：多个老单元覆盖同一个新单元
+    const pieces = [];
+    let starred = false;
+    let allDone = true;
+    for (let k = 0; k < oldSpans.length; k++) {
+      const os = oldSpans[k];
+      if (!os) continue;
+      if (!(os[1] > ns[0] && os[0] < ns[1])) continue;
+      const oldUnit = previous[k] || {};
+      if (oldUnit.starred) starred = true;
+      const text = oldUnit.translation || '';
+      if (!(oldUnit.done || text.trim())) allDone = false;
+      if (text.trim()) pieces.push(text);
+    }
+    const joined = pieces.join('\n');
+    return { source: src, translation: joined, done: !!joined.trim(), starred: starred };
+  });
+}
+
 function applyMode(doc, target) {
   if (doc.unitMode === target) return;
   const source = doc.sourceText || doc.units.map((u) => u.source).join('\n');
-  const old = new Map(doc.units.map((u) => [u.source, u]));
-  doc.units = parseUnits(source, target).map((s) => {
-    const prev = old.get(s);
-    return prev
-      ? { source: s, translation: prev.translation || '', done: !!prev.done, starred: !!prev.starred }
-      : { source: s, translation: '', done: false, starred: false };
-  });
+  const newSources = parseUnits(source, target).map((u) => (typeof u === 'string' ? u : u.source));
+  doc.units = realignUnits(source, doc.units, newSources);
   doc.unitMode = target;
 }
 
@@ -730,8 +829,48 @@ function persistManualPeers() {
   saveState();
 }
 
+/**
+ * 要发广播的地址：255.255.255.255 + 每块在用网卡的子网广播地址。
+ * 只发 255.255.255.255 时，多网卡（有线 + Wi-Fi + 虚拟网卡）经常一个包都出不去 ——
+ * 「自动发现不灵」多半就是它。
+ */
+function broadcastTargets() {
+  const out = ['255.255.255.255'];
+  try {
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      for (const info of ifaces[name] || []) {
+        if (info.family !== 'IPv4' || info.internal) continue;
+        const ip = info.address.split('.').map(Number);
+        const mask = (info.netmask || '255.255.255.0').split('.').map(Number);
+        if (ip.length !== 4 || mask.length !== 4) continue;
+        const b = ip.map((v, i) => (v | (~mask[i] & 255)));
+        const addr = b.join('.');
+        if (!out.includes(addr)) out.push(addr);
+      }
+    }
+  } catch { /* 枚举失败就只用 255.255.255.255 */ }
+  return out;
+}
+
 /** UDP 广播发现：每 3 秒喊一次；20 秒没听到就当掉线（手填的保留）。 */
 let discoverySocket = null;
+let lastProbeAt = 0;
+
+/** 立即搜索：马上发一次带 q=1 的探针，在线设备会单播回包（列表刷新时调用）。 */
+function probePeers() {
+  if (!discoverySocket) return;
+  const now = Date.now();
+  if (now - lastProbeAt < 1500) return;
+  lastProbeAt = now;
+  const payload = Buffer.from(JSON.stringify({
+    lt: 'peer', v: PEER_API, q: 1, id: peerSelf.id, name: peerSelf.name,
+    platform: 'web', version: VERSION, port: config.port,
+  }), 'utf8');
+  for (const target of broadcastTargets()) {
+    try { discoverySocket.send(payload, 0, payload.length, config.discoveryPort, target); } catch { /* ignore */ }
+  }
+}
 function startDiscovery() {
   if (process.env.LT_DISCOVERY === '0') return;
   try {
@@ -753,6 +892,14 @@ function startDiscovery() {
         port: port,
         lastSeen: Date.now(),
       });
+      // 对方在「立即搜索」：单播回一个自己的信息，让它马上看见我
+      if (Number(msg.q) === 1 && msg.id !== peerSelf.id) {
+        const answer = Buffer.from(JSON.stringify({
+          lt: 'peer', v: PEER_API, id: peerSelf.id, name: peerSelf.name,
+          platform: 'web', version: VERSION, port: config.port,
+        }), 'utf8');
+        try { sock.send(answer, 0, answer.length, rinfo.port, rinfo.address); } catch { /* ignore */ }
+      }
     });
     sock.bind(config.discoveryPort, () => {
       try { sock.setBroadcast(true); } catch { /* 某些环境不允许广播 */ }
@@ -761,7 +908,9 @@ function startDiscovery() {
           lt: 'peer', v: PEER_API, id: peerSelf.id, name: peerSelf.name,
           platform: 'web', version: VERSION, port: config.port,
         }), 'utf8');
-        try { sock.send(payload, 0, payload.length, config.discoveryPort, '255.255.255.255'); } catch { /* ignore */ }
+        for (const target of broadcastTargets()) {
+          try { sock.send(payload, 0, payload.length, config.discoveryPort, target); } catch { /* ignore */ }
+        }
         const now = Date.now();
         for (const [id, p] of peerStore.discovered) {
           if (now - p.lastSeen > 20000) peerStore.discovered.delete(id);
@@ -1045,6 +1194,7 @@ async function handleApi(req, res, url, payload) {
         persistManualPeers();
         return sendJson(res, 200, { ok: true, peers: peerList() });
       }
+      probePeers();   // 每次刷新列表顺手问一句，不用等 3 秒周期
       return sendJson(res, 200, { ok: true, self: peerSelf, peers: peerList(), discovery: !!discoverySocket });
     }
 
