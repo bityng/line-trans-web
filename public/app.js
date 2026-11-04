@@ -12,9 +12,11 @@
 
   var QS = new URLSearchParams(location.search);
   var TOKEN = QS.get('token') || '';
-  // 深链：安卓原生「设备」页点「直接编辑」会带 ?peer=<设备id>&doc=<文档id> 过来
-  var DEEP_PEER = QS.get('peer') || '';
-  var DEEP_DOC = QS.get('doc') || '';
+  // 深链：安卓原生「设备」页点「直接编辑」会带 ?peer=<设备id>&doc=<文档id> 过来。
+  // 两个参数随后都会拼进代理请求（服务端要替我们去访问对端），这里按白名单收一道：
+  // id 只可能是 UUID 或手填服务器的规范化地址，其它一律当没传，别让脏参数借道本机服务。
+  var DEEP_PEER = safeId(QS.get('peer') || '');
+  var DEEP_DOC = safeId(QS.get('doc') || '');
   var THEME_KEY = 'lt-theme';
   var WINDOW_SIZE = 60;
 
@@ -76,6 +78,33 @@
       var type = res.headers.get('content-type') || '';
       return type.indexOf('application/json') >= 0 ? res.json() : res.text();
     });
+  }
+
+  /** id 白名单：设备 / 文档 id 只可能是 UUID 或规范化地址（手填服务器的兜底 id）。
+   *  深链 ?peer= &doc= 会拼进代理请求（服务端替我们访问对端），过不了白名单的一律当没传。 */
+  function safeId(value) {
+    return /^[A-Za-z0-9][A-Za-z0-9._~:\/-]{0,299}$/.test(value) ? value : '';
+  }
+
+  /**
+   * 添加远程服务器前的地址校验（SSRF 闸门）：本机会替你去探测这个地址，
+   * 所以只放行 http(s)，拒绝回环与链路本地地址 —— 后者含 169.254.169.254 云厂商元数据端点。
+   * 手填回环也没有意义：本机文档直接就能编辑，不需要加成「远程设备」。
+   * 返回规范化后的地址（补 scheme、去结尾斜杠），不合法返回 null。
+   */
+  function safePeerUrl(raw) {
+    var v = String(raw == null ? '' : raw).trim();
+    if (!v || v.length > 500) return null;
+    if (!/^https?:\/\//i.test(v) && v.indexOf('http') !== 0) v = 'http://' + v;
+    if (!/^https?:\/\//i.test(v)) return null;
+    var u;
+    try { u = new URL(v); } catch (e) { return null; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    var host = (u.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    if (!host) return null;
+    if (host === 'localhost' || host === '::1' || host === '::' || host === '0.0.0.0') return null;
+    if (/^127(\.\d{1,3}){0,3}$/.test(host) || /^169\.254(\.\d{1,3}){2}$/.test(host)) return null;
+    return u.protocol + '//' + u.host + u.pathname.replace(/\/+$/, '') + u.search;
   }
 
   var toastTimer = null;
@@ -1373,8 +1402,11 @@
     $('peerMask').hidden = false;
 
     $('btnPeerSave').addEventListener('click', function () {
-      var url = $('peerUrl').value.trim();
-      if (!url) { toast('先填地址'); return; }
+      var url = safePeerUrl($('peerUrl').value);
+      if (!url) {
+        $('peerAddHint').textContent = '地址无效：只支持 http(s)，且不能是本机回环 / 链路本地地址';
+        return;
+      }
       $('peerAddHint').textContent = '正在连接…';
       api('api/peers', {
         method: 'POST',

@@ -34,7 +34,7 @@ const DICT_DIR = path.join(ROOT, 'dict');
 const DICT_CORE_FILE = path.join(DICT_DIR, 'core.tsv');
 const DICT_LEMMA_FILE = path.join(DICT_DIR, 'lemma.tsv');
 const DICT_IMPORT_FILE = path.join(DICT_DIR, 'dict-import.tsv');
-const VERSION = '1.9.4';
+const VERSION = '1.9.6';
 
 // 文本清洗/切分用到的正则（在数据初始化前就要能用到）
 const TIMECODE = /^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->.*$/;
@@ -980,7 +980,8 @@ const STATIC_FILES = new Set([
 
 function serveStatic(res, name) {
   const file = path.join(PUBLIC_DIR, name);
-  if (!file.startsWith(PUBLIC_DIR) || !fs.existsSync(file)) {
+  // 必须带目录分隔符做前缀：裸 startsWith(PUBLIC_DIR) 会被同级目录（如 public-evil）绕过
+  if (!file.startsWith(PUBLIC_DIR + path.sep) || !fs.existsSync(file)) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
     res.end('404');
     return;
@@ -988,6 +989,15 @@ function serveStatic(res, name) {
   const body = fs.readFileSync(file);
   res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'content-length': body.length });
   res.end(body);
+}
+
+/** 回环 / 链路本地主机名一律拒绝入册（与网页台 app.js 的 safePeerUrl 同一套规则）。 */
+function rejectedPeerHost(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (h === 'localhost' || h === '::1' || h === '::' || h === '0.0.0.0') return true;
+  if (h.startsWith('127.') || h.startsWith('169.254.')) return true;
+  return false;
 }
 
 async function handleApi(req, res, url, payload) {
@@ -1174,6 +1184,14 @@ async function handleApi(req, res, url, payload) {
         const raw = typeof payload.url === 'string' ? payload.url.trim() : '';
         if (!raw) return sendJson(res, 400, { error: '缺少 url' });
         const url = (/^https?:\/\//i.test(raw) ? raw : 'http://' + raw).replace(/\/+$/, '');
+        // SSRF 闸门（服务端不信任客户端）：服务器会替调用方去探测这个地址，不能被当成
+        // 访问本机回环 / 链路本地端点（含 169.254.169.254 云元数据）的跳板。
+        // 手填回环也没有意义 —— 本机文档直接就能编辑，不需要加成「远程设备」。
+        let peerHost = '';
+        try { peerHost = new URL(url).hostname; } catch { peerHost = ''; }
+        if (url.length > 500 || !peerHost || rejectedPeerHost(peerHost)) {
+          return sendJson(res, 200, { ok: false, error: '地址无效：只支持 http(s)，且不能是本机回环 / 链路本地地址' });
+        }
         const token = typeof payload.token === 'string' ? payload.token.trim() : '';
         const wanted = typeof payload.name === 'string' ? payload.name.trim() : '';
         let remote = {};
