@@ -255,8 +255,15 @@
     }
     var from = state.windowStart;
     var to = Math.min(from + WINDOW_SIZE, state.filtered.length);
-    for (var i = from; i < to; i++) editor.appendChild(renderRow(state.filtered[i]));
+    var added = [];
+    for (var i = from; i < to; i++) {
+      var row = renderRow(state.filtered[i]);
+      editor.appendChild(row);
+      added.push(row);
+    }
     state.windowStart = to;
+    // 高度必须等元素插进 DOM 之后才量得到（scrollHeight 依赖真实排版）
+    for (var k = 0; k < added.length; k++) autoGrowIn(added[k]);
     updateWindowInfo();
     observeSentinel();
   }
@@ -288,6 +295,44 @@
       }, { root: $('scrollArea'), rootMargin: '400px' });
     }
     sentinelObserver.observe(sentinel);
+  }
+
+  /**
+   * 译文 / 原文输入框跟着内容长高。
+   * 外框 .row 是普通流式布局，textarea 变高卡片就跟着变高，「输入框与外框不同步」就是这里断的。
+   * 高度只往大了写：下限由 CSS 的 min-height 兜（高度设得比 min-height 小时浏览器本来就取 min-height）。
+   */
+  function autoGrow(ta) {
+    if (!ta || !ta.parentNode) return;
+    // display:none 时量不到真实高度，直接跳过（下次可见时会重新渲染）
+    if (ta.offsetParent === null && ta.getClientRects().length === 0) return;
+    var border = ta.offsetHeight - ta.clientHeight;   // border-box 下 scrollHeight 不含边框，要补回去
+    ta.style.height = 'auto';
+    ta.style.height = (ta.scrollHeight + (border > 0 ? border : 0)) + 'px';
+  }
+
+  /** 批量量高：先全部复位（写），再统一读 scrollHeight，最后一次性写回 —— 只触发一轮重排。
+   *  60 行一批、拖窗口重新排版都走这里，逐个「写→读」会把重排次数放大好几倍。 */
+  function autoGrowIn(root) {
+    if (!root) return;
+    var list = root.querySelectorAll('textarea.translation, textarea.source-edit');
+    var usable = [];
+    var i, ta;
+    for (i = 0; i < list.length; i++) {
+      ta = list[i];
+      if (!ta.parentNode) continue;
+      if (ta.offsetParent === null && ta.getClientRects().length === 0) continue;
+      ta.style.height = 'auto';
+      usable.push(ta);
+    }
+    if (!usable.length) return;
+    var heights = [];
+    for (i = 0; i < usable.length; i++) {
+      ta = usable[i];
+      var border = ta.offsetHeight - ta.clientHeight;
+      heights.push(ta.scrollHeight + (border > 0 ? border : 0));
+    }
+    for (i = 0; i < usable.length; i++) usable[i].style.height = heights[i] + 'px';
   }
 
   function renderRow(u) {
@@ -345,6 +390,7 @@
     ta.spellcheck = false;
     var timer = null;
     ta.addEventListener('input', function () {
+      autoGrow(ta);
       clearTimeout(timer);
       timer = setTimeout(function () { saveUnit(u.i, { translation: ta.value }); }, 500);
     });
@@ -395,6 +441,7 @@
     });
     box.style.display = 'none';
     box.parentNode.insertBefore(ta, box.nextSibling);
+    autoGrow(ta);
     ta.focus();
   }
 
@@ -515,7 +562,7 @@
         var row = document.querySelector('.row[data-index="' + index + '"]');
         if (row) {
           var ta = row.querySelector('textarea.translation');
-          if (ta) ta.value = res.text;
+          if (ta) { ta.value = res.text; autoGrow(ta); }
           var dot = row.querySelector('.row-label .dot');
           if (dot) dot.className = 'dot done';
         }
@@ -1523,6 +1570,13 @@
     $('btnClosePeer').addEventListener('click', function () { $('peerMask').hidden = true; });
     $('peerMask').addEventListener('click', function (e) { if (e.target === $('peerMask')) $('peerMask').hidden = true; });
     $('btnRemoteExit').addEventListener('click', exitRemote);
+
+    // 窗口变窄 → 折行变多 → 输入框要重新量高（去抖，拖拽窗口时别连打）
+    var growTimer = null;
+    window.addEventListener('resize', function () {
+      clearTimeout(growTimer);
+      growTimer = setTimeout(function () { autoGrowIn(editor); }, 120);
+    });
 
     bindLookup();
     window.addEventListener('beforeunload', function (e) {
